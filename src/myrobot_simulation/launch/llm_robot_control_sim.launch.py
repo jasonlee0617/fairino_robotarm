@@ -9,7 +9,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
-from manipulation_common.launch_utils.yaml_loader import (
+from myrobot_common.launch_utils.yaml_loader import (
     launch_defaults_as_strings,
     launch_parameter_value,
     load_launch_parameters_yaml,

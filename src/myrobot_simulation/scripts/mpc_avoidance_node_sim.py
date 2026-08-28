@@ -20,9 +20,9 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory
 
-from manipulation_common.planning.motion_executor import MoveItMotion, PlannerSwitch
-from manipulation_common.utils.params import param
-from manipulation_common.utils.pose_tools import PoseTools
+from myrobot_common.planning.motion_executor import MoveItMotion, PlannerSwitch
+from myrobot_common.utils.params import param
+from myrobot_common.utils.pose_tools import PoseTools
 
 
 class DemoStage(Enum):

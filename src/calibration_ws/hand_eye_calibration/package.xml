@@ -26,7 +26,7 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>manipulation_common</exec_depend>
+  <exec_depend>myrobot_common</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>
   <exec_depend>pymoveit2</exec_depend>
   <exec_depend>python3-numpy</exec_depend>

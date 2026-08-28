@@ -30,7 +30,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   # Tests import this package plus source-tree workspace dependencies.
   set(_test_pythonpath
-    "${CMAKE_CURRENT_SOURCE_DIR}:${CMAKE_CURRENT_SOURCE_DIR}/../../myrobot_common_ws/manipulation_common:${CMAKE_CURRENT_SOURCE_DIR}/../easy_handeye2/easy_handeye2")
+    "${CMAKE_CURRENT_SOURCE_DIR}:${CMAKE_CURRENT_SOURCE_DIR}/../../myrobot_common_ws/myrobot_common:${CMAKE_CURRENT_SOURCE_DIR}/../easy_handeye2/easy_handeye2")
   ament_add_pytest_test(test_config test/test_config.py
     APPEND_ENV "PYTHONPATH=${_test_pythonpath}")
   ament_add_pytest_test(test_collector test/test_collector.py

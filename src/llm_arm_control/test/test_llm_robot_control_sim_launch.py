@@ -64,7 +64,7 @@ def test_llm_launch_starts_cli_and_new_perception_without_motion_control_node():
     old_server = "llm" + "_yolo_task_server"
     assert f'executable="{old_monitor}"' not in source
     assert f'executable="{old_server}"' not in source
-    assert 'package="manipulation_common"' not in source
+    assert 'package="myrobot_common"' not in source
     assert 'executable="motion_control"' not in source
 
 

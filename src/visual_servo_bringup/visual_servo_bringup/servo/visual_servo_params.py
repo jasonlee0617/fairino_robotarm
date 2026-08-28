@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from manipulation_common.utils.params import param
+from myrobot_common.utils.params import param
 
 
 def _int_list(node, name: str, default: list[int]) -> set[int]:

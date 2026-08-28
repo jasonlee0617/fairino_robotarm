@@ -31,7 +31,7 @@ myrobot_simulation/
     moveit_stack.py
     perception_stack.py
     launch_parsing.py
-  manipulation_common.launch_utils/
+  myrobot_common.launch_utils/
     yaml_loader.py
   config/robots/
     fairino_arm_gripper_onbase.yaml

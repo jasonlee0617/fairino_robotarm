@@ -32,11 +32,11 @@ from std_msgs.msg import Bool, Float32, Float32MultiArray, String
 from std_srvs.srv import Trigger
 
 # 项目内部模块
-from manipulation_common.planning.motion_executor import MoveItMotion, PlanScoreConfig, PlannerSwitch
-from manipulation_common.planning.trajectory_scoring import select_best_path
-from manipulation_common.task.abort_manager import AbortManager
-from manipulation_common.utils.params import param
-from manipulation_common.utils.pose_tools import PoseTools
+from myrobot_common.planning.motion_executor import MoveItMotion, PlanScoreConfig, PlannerSwitch
+from myrobot_common.planning.trajectory_scoring import select_best_path
+from myrobot_common.task.abort_manager import AbortManager
+from myrobot_common.utils.params import param
+from myrobot_common.utils.pose_tools import PoseTools
 from graspnet_bringup.task.graspnet_state_machine import GraspnetStateMachine
 from graspnet_bringup.task.task_types import GraspCandidate, GraspState
 from graspnet_bringup.task import graspnet_candidate_utils as _candidate_utils

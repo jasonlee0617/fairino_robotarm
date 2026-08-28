@@ -6,8 +6,8 @@ from typing import Optional
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import PoseStamped
 from llm_arm_control.srv import ControlPose
-from manipulation_common.planning.motion_executor import MoveItMotion, PlannerSwitch
-from manipulation_common.task.abort_manager import AbortManager
+from myrobot_common.planning.motion_executor import MoveItMotion, PlannerSwitch
+from myrobot_common.task.abort_manager import AbortManager
 from pymoveit2 import MoveIt2
 import rclpy
 from rclpy.action import ActionClient

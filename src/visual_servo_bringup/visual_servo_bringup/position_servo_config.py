@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from manipulation_common.launch_utils.yaml_loader import flatten_moveit_parameters
+from myrobot_common.launch_utils.yaml_loader import flatten_moveit_parameters
 
 
 _CONTROLLER_TYPES = {"PID", "PD", "PI_FF", "ADAPTIVE_PID", "LADRC", "NLADRC", "MPC"}

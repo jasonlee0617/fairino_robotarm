@@ -8,7 +8,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchD
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from manipulation_common.launch_utils.yaml_loader import (
+from myrobot_common.launch_utils.yaml_loader import (
     launch_defaults_as_strings,
     launch_parameter_value,
     load_launch_parameters_yaml,
@@ -182,7 +182,7 @@ def _launch_setup(context):
         ],
     )
     motion_control = Node(
-        package="manipulation_common",
+        package="myrobot_common",
         executable="motion_control",
         name="motion_control",
         output="screen",

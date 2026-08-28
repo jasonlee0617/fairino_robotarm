@@ -17,7 +17,7 @@
   <depend>tf2_ros</depend>
 
   <exec_depend>visual_perception</exec_depend>
-  <exec_depend>manipulation_common</exec_depend>
+  <exec_depend>myrobot_common</exec_depend>
   <exec_depend>hand_eye_calibration</exec_depend>
   <exec_depend>ros2_aruco</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

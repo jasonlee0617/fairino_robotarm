@@ -48,11 +48,11 @@
 - `launch/visual_grasping.launch.py`
 - `launch/visual_octmap.launch.py`
 
-已迁出的入口（visual_perception / manipulation_common）：
+已迁出的入口（visual_perception / myrobot_common）：
 
 - `yolo_detector`, `yolo_detector_obb` → `visual_perception`
-- `motion_control` → `manipulation_common`
-- 共享模块（trajectory_scoring, motion_executor, keepout_manager, detection_cache, target_selector, abort_manager, pose_tools, tf_tools, params, yaml_loader）→ `manipulation_common`
+- `motion_control` → `myrobot_common`
+- 共享模块（trajectory_scoring, motion_executor, keepout_manager, detection_cache, target_selector, abort_manager, pose_tools, tf_tools, params, yaml_loader）→ `myrobot_common`
 
 如需一键启动 Gazebo/MoveIt/相机/抓取，应优先在 `myrobot_simulation` 中编排，或者让上层 launch include `myrobot_simulation/launch/gazebo_yolo.launch.py`。不要恢复本包旧 `gazebo.launch.py`。
 
@@ -68,10 +68,10 @@
   - `task_types.py` 定义 `TargetType` 和 `TaskState`。
   - `grasp_profile.py` 解析 YAML 中的抓取姿态和高度。
   - `elongated_object_box_state_machine.py` 承载原抓取状态机。
-- `myrobot_common_ws/manipulation_common/manipulation_common/perception/`
+- `myrobot_common_ws/myrobot_common/myrobot_common/perception/`
   - `detection_cache.py` 缓存目标点和 RPY。
   - `target_selector.py` 封装 preferred target、目标优先级和检测超时校验。
-- `myrobot_common_ws/manipulation_common/manipulation_common/planning/`
+- `myrobot_common_ws/myrobot_common/myrobot_common/planning/`
   - `motion_executor.py` 封装 MoveIt2 规划执行、候选轨迹评分、gripper 控制、IK/planner 切换。
 
 `setup.py` 重新安装 `config/*.yaml`，但不会安装 URDF/SDF/Xacro，避免恢复旧 Gazebo 资产。
@@ -297,11 +297,11 @@ visual_grasping
 
 - `task/elongated_object_box_state_machine.py`
   - 状态切换和错误恢复。
-- `myrobot_common_ws/manipulation_common/manipulation_common/perception/detection_cache.py`
+- `myrobot_common_ws/myrobot_common/myrobot_common/perception/detection_cache.py`
   - 缓存 elongated_object/cube/box/stone 的位置和 RPY。
-- `myrobot_common_ws/manipulation_common/manipulation_common/perception/target_selector.py`
+- `myrobot_common_ws/myrobot_common/myrobot_common/perception/target_selector.py`
   - preferred target、目标优先级、检测超时判断。
-- `myrobot_common_ws/manipulation_common/manipulation_common/planning/motion_executor.py`
+- `myrobot_common_ws/myrobot_common/myrobot_common/planning/motion_executor.py`
   - MoveIt2 arm/hand 封装、规划、执行、重定时、planner command。
 
 后续建议继续拆分：
@@ -310,7 +310,7 @@ visual_grasping
   - 如后续需要重新引入桌面/环境碰撞体，应独立管理 collision object 和 planning scene。
 - `grasp_policy.py`
   - 目标姿态、放置策略、失败重试策略。
-- `myrobot_common_ws/manipulation_common/manipulation_common/utils/`
+- `myrobot_common_ws/myrobot_common/myrobot_common/utils/`
   - 共享 `pose_tools.py`、`tf_tools.py`、`trajectory_scoring.py` 等工具，旧 `scripts/` 包装层已移除。
 
 ### 6.3 Launch 重构

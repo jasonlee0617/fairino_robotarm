@@ -7,7 +7,7 @@ from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 
 from .robot_profiles import RobotProfile
-from manipulation_common.launch_utils.yaml_loader import (
+from myrobot_common.launch_utils.yaml_loader import (
     load_yaml,
     package_file,
     wrap_yaml_as_ros_params_file,

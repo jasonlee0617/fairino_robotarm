@@ -5,7 +5,7 @@ from xml.etree import ElementTree
 import yaml
 import pytest
 
-from manipulation_common.launch_utils.yaml_loader import (
+from myrobot_common.launch_utils.yaml_loader import (
     load_launch_parameters_yaml,
     load_moveit_parameters_yaml,
     load_node_parameters_yaml,

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from manipulation_common.launch_utils.yaml_loader import flatten_moveit_parameters
+from myrobot_common.launch_utils.yaml_loader import flatten_moveit_parameters
 
 
 def config_path() -> Path:

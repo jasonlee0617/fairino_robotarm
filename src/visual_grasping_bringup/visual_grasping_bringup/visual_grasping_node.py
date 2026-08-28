@@ -16,14 +16,14 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
 
-from manipulation_common.perception.detection_cache import DetectionCache
-from manipulation_common.perception.target_selector import TargetSelector
-from manipulation_common.planning.motion_executor import MoveItMotion, PlanScoreConfig, PlannerSwitch
-from manipulation_common.planning.trajectory_scoring import select_best_path
-from manipulation_common.task.abort_manager import AbortManager
-from manipulation_common.utils.params import param
-from manipulation_common.utils.pose_tools import PoseTools
-from manipulation_common.utils.tf_tools import TfTools
+from myrobot_common.perception.detection_cache import DetectionCache
+from myrobot_common.perception.target_selector import TargetSelector
+from myrobot_common.planning.motion_executor import MoveItMotion, PlanScoreConfig, PlannerSwitch
+from myrobot_common.planning.trajectory_scoring import select_best_path
+from myrobot_common.task.abort_manager import AbortManager
+from myrobot_common.utils.params import param
+from myrobot_common.utils.pose_tools import PoseTools
+from myrobot_common.utils.tf_tools import TfTools
 from visual_grasping_bringup.task.grasp_profile import load_grasp_profiles
 from visual_grasping_bringup.task.visual_grasping_state_machine import VisualGraspingStateMachine
 from visual_grasping_bringup.task.task_types import TaskState

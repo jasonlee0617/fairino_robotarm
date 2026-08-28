@@ -15,7 +15,7 @@ from std_srvs.srv import Trigger
 
 PKG_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_ROOT = os.path.abspath(os.path.join(PKG_ROOT, "..", ".."))
-for path in (PKG_ROOT, os.path.join(SRC_ROOT, "pymoveit2"), os.path.join(SRC_ROOT, "manipulation_common")):
+for path in (PKG_ROOT, os.path.join(SRC_ROOT, "pymoveit2"), os.path.join(SRC_ROOT, "myrobot_common")):
     if path not in sys.path:
         sys.path.insert(0, path)
 pkg = sys.modules.get("graspnet_bringup")

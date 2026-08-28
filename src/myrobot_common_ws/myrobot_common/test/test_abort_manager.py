@@ -6,7 +6,7 @@ from unittest.mock import patch
 from std_msgs.msg import Bool
 from std_msgs.msg import String
 
-from manipulation_common.task.abort_manager import AbortManager
+from myrobot_common.task.abort_manager import AbortManager
 
 
 class _Logger:
@@ -445,7 +445,7 @@ def test_reset_without_hooks_leaves_abort_for_owner_recovery():
     assert arm.cancelled == 1
 
 
-@patch("manipulation_common.task.abort_manager.rclpy.ok", return_value=True)
+@patch("myrobot_common.task.abort_manager.rclpy.ok", return_value=True)
 def test_wait_requires_an_active_motion_before_idle_success(_ok):
     abort = AbortManager(_Node(), arm=_MoveIt(), gripper=_MoveIt())
 

@@ -25,7 +25,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from manipulation_common.nodes.motion_control_node import (
+from myrobot_common.nodes.motion_control_node import (
     motion_command_for_key,
     trajectory_event_for_command,
 )

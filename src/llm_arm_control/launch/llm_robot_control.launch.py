@@ -18,7 +18,7 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from manipulation_common.launch_utils.yaml_loader import (
+from myrobot_common.launch_utils.yaml_loader import (
     launch_defaults_as_strings,
     launch_parameter_value,
     load_launch_parameters_yaml,
@@ -31,7 +31,8 @@ _HANDEYE_LAUNCH_DIR = os.path.join(
 )
 if _HANDEYE_LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _HANDEYE_LAUNCH_DIR)
-from handeye_launch_utils import camera_launch, value  # noqa: E402
+from myrobot_common.camera.launch import camera_launch
+from handeye_launch_utils import value  # noqa: E402
 
 
 _TASK_PARAMETERS = load_node_parameters_yaml(

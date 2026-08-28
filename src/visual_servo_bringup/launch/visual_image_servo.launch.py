@@ -18,7 +18,7 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from manipulation_common.launch_utils.yaml_loader import load_launch_parameters_yaml, load_yaml
+from myrobot_common.launch_utils.yaml_loader import load_launch_parameters_yaml, load_yaml
 from moveit_configs_utils import MoveItConfigsBuilder
 from visual_servo_bringup.image_servo_config import (
     NODE_PARAMETER_DESCRIPTIONS,
@@ -31,7 +31,8 @@ _HANDEYE_LAUNCH_DIR = os.path.join(get_package_share_directory("hand_eye_calibra
 if _HANDEYE_LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _HANDEYE_LAUNCH_DIR)
 
-from handeye_launch_utils import camera_launch, value  # noqa: E402
+from myrobot_common.camera.launch import camera_launch
+from handeye_launch_utils import value  # noqa: E402
 
 
 _REFERENCE_PATH = str(

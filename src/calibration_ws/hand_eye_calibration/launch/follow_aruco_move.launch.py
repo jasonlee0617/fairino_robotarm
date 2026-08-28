@@ -10,7 +10,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Opaq
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from manipulation_common.launch_utils.yaml_loader import (
+from myrobot_common.launch_utils.yaml_loader import (
     launch_defaults_as_strings,
     launch_parameter_value,
     load_launch_parameters_yaml,
@@ -22,11 +22,11 @@ if _LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _LAUNCH_DIR)
 
 from handeye_launch_utils import (  # noqa: E402
-    camera_launch,
     default_storage_directory,
     load_handeye_profile,
     value,
 )
+from myrobot_common.camera.launch import camera_launch
 
 
 _LAUNCH_ARGUMENT_SPECS = (

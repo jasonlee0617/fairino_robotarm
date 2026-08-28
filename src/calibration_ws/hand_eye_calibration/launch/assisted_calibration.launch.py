@@ -10,7 +10,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 import yaml
-from manipulation_common.launch_utils.yaml_loader import launch_parameter_value
+from myrobot_common.launch_utils.yaml_loader import launch_parameter_value
 
 _LAUNCH_DIR = os.path.dirname(__file__)
 if _LAUNCH_DIR not in sys.path:

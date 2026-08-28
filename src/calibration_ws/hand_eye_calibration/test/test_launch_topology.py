@@ -166,7 +166,7 @@ def test_follow_aruco_move_uses_hardware_moveit_and_shared_global_motion():
     follow = config["nodes"]["aruco_marker_follower"]["ros__parameters"]
     assert follow["above_offset"] == 0.20
     assert follow["target_rpy_deg"] == [0.0, -180.0, 100.0]
-    assert "from manipulation_common.utils.params import param" in follower
+    assert "from myrobot_common.utils.params import param" in follower
     assert "self.arm_group_name = self._string" in follower
 
 
@@ -195,6 +195,17 @@ def test_handeye_launches_use_the_independent_aruco_yaml():
         assert "aruco_parameters.yaml" in source
 
 
+def test_camera_launch_is_shared_outside_handeye_utilities():
+    helper = _source("handeye_launch_utils.py")
+    assert "def camera_launch" not in helper
+    for name in (
+        "calibrate.launch.py",
+        "evaluate.launch.py",
+        "follow_aruco_move.launch.py",
+    ):
+        assert "from myrobot_common.camera.launch import camera_launch" in _source(name)
+
+
 def test_auto_collector_launch_is_isolated_and_exposes_motion_overrides():
     source = _source("auto_calibration_collector_launch.py")
     collector_root = LAUNCH_ROOT.parent / "hand_eye_calibration"
@@ -202,8 +213,8 @@ def test_auto_collector_launch_is_isolated_and_exposes_motion_overrides():
         path.read_text(encoding="utf-8") for path in collector_root.rglob("*.py")
     )
     motion_executor_source = (
-        LAUNCH_ROOT.parents[2] / "myrobot_common_ws" / "manipulation_common"
-        / "manipulation_common" / "planning" / "motion_executor.py"
+        LAUNCH_ROOT.parents[2] / "myrobot_common_ws" / "myrobot_common"
+        / "myrobot_common" / "planning" / "motion_executor.py"
     ).read_text(encoding="utf-8")
 
     assert 'executable="auto_calibration_collector.py"' in source

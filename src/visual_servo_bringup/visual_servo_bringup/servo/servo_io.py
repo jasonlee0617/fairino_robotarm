@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 import tf2_ros
 from geometry_msgs.msg import TwistStamped
-from manipulation_common.utils.params import param
+from myrobot_common.utils.params import param
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState

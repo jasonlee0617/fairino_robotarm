@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>manipulation_common</name>
+  <name>myrobot_common</name>
   <version>0.1.0</version>
-  <description>Shared runtime utilities for manipulation pipelines: visual servo, grasping, and octomap grasping.</description>
+  <description>Shared runtime utilities for MyRobot pipelines.</description>
   <maintainer email="robot@example.com">robot</maintainer>
   <license>Apache-2.0</license>
 
@@ -16,6 +16,9 @@
   <depend>shape_msgs</depend>
   <depend>pymoveit2</depend>
   <depend>ament_index_python</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>depthai_ros_driver</exec_depend>
+  <exec_depend>realsense2_camera</exec_depend>
   <depend>python3-numpy</depend>
   <depend>python3-scipy</depend>
 

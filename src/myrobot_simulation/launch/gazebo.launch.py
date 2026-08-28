@@ -15,7 +15,7 @@ from launch_utils.launch_parsing import as_bool, spawn_pose_from_context  # noqa
 from launch_utils.perception_stack import camera_bridge_nodes, servo_node  # noqa: E402
 from launch_utils.d435_profile import d435_mappings  # noqa: E402
 from launch_utils.robot_profiles import load_robot_profile  # noqa: E402
-from manipulation_common.launch_utils.yaml_loader import load_yaml  # noqa: E402
+from myrobot_common.launch_utils.yaml_loader import load_yaml  # noqa: E402
 
 
 CALIBRATION_BOARD_MOUNT_DEFAULTS = {

@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'manipulation_common'
+package_name = 'myrobot_common'
 
 setup(
     name=package_name,
@@ -18,12 +18,12 @@ setup(
     zip_safe=True,
     maintainer='robot',
     maintainer_email='robot@example.com',
-    description='Shared manipulation runtime utilities.',
+    description='Shared MyRobot runtime utilities.',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'motion_control = manipulation_common.nodes.motion_control_node:main',
+            'motion_control = myrobot_common.nodes.motion_control_node:main',
         ],
     },
 )

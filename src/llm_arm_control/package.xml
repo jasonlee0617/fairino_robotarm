@@ -22,7 +22,7 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>trajectory_msgs</depend>
 
-  <exec_depend>manipulation_common</exec_depend>
+  <exec_depend>myrobot_common</exec_depend>
   <exec_depend>pymoveit2</exec_depend>
   <exec_depend>visual_perception</exec_depend>
   <exec_depend>cv_bridge</exec_depend>

@@ -8,9 +8,9 @@ import time
 import rclpy
 import tf2_ros
 from geometry_msgs.msg import PoseStamped
-from manipulation_common.planning.motion_executor import MoveItMotion
-from manipulation_common.utils.params import param
-from manipulation_common.utils.pose_tools import PoseTools
+from myrobot_common.planning.motion_executor import MoveItMotion
+from myrobot_common.utils.params import param
+from myrobot_common.utils.pose_tools import PoseTools
 from pymoveit2 import MoveIt2
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor

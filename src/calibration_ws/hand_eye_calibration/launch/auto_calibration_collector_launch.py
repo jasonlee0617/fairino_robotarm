@@ -10,7 +10,7 @@ from launch_ros.actions import Node
 import yaml
 
 from hand_eye_calibration.config import flatten_ros_parameters
-from manipulation_common.launch_utils.yaml_loader import (
+from myrobot_common.launch_utils.yaml_loader import (
     launch_defaults_as_strings,
     launch_parameter_value,
 )

@@ -14,7 +14,7 @@
   <exec_depend>realsense2_camera</exec_depend>
 
   <exec_depend>visual_perception</exec_depend>
-  <exec_depend>manipulation_common</exec_depend>
+  <exec_depend>myrobot_common</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>pymoveit2</exec_depend>

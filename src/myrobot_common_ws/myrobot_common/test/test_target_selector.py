@@ -7,8 +7,8 @@ from geometry_msgs.msg import Point, PointStamped, Vector3, Vector3Stamped
 from rclpy.node import Node
 from std_msgs.msg import Header
 
-from manipulation_common.perception.detection_cache import DetectionCache, DetectionSubscribers
-from manipulation_common.perception.target_selector import TargetSelector
+from myrobot_common.perception.detection_cache import DetectionCache, DetectionSubscribers
+from myrobot_common.perception.target_selector import TargetSelector
 
 
 class _FakeTargetType:

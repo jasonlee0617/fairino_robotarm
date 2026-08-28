@@ -104,7 +104,7 @@ def test_each_grasp_entry_embeds_one_motion_control_node():
             and isinstance(call.func, ast.Name)
             and call.func.id == "Node"
             and isinstance(_keyword(call, "package"), ast.Constant)
-            and _keyword(call, "package").value == "manipulation_common"
+            and _keyword(call, "package").value == "myrobot_common"
         ]
         assert len(motion_control_nodes) == 1
 

@@ -114,7 +114,7 @@ common:
         servo_status_halt_codes: [2, 4, 5]
         aligned_stable_count: 80
       perception:
-        active_source: aruco # yolo_kalman / aruco
+        active_source: yolo_kalman # yolo_kalman / aruco
         yolo_kalman:
           backend: tensorrt
           model_path: yolo-obb-640.engine

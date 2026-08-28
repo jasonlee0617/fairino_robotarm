@@ -8,7 +8,7 @@ gripper or simulated camera.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from manipulation_common.launch_utils.yaml_loader import load_yaml
+from myrobot_common.launch_utils.yaml_loader import load_yaml
 
 
 @dataclass(frozen=True)

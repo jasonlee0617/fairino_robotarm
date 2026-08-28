@@ -1,10 +1,6 @@
-import os
 from pathlib import Path
 from types import MappingProxyType
 
-from ament_index_python.packages import get_package_share_directory
-from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
 
@@ -57,20 +53,3 @@ def value(context, name: str) -> str:
 
 def profile_value(context, profile: dict, name: str) -> str:
     return str(profile.get(name, ""))
-
-
-def camera_launch(camera_type: str, *, realsense_args=None, oak_args=None):
-    if camera_type == "oak":
-        arguments = {"rs_compat": "true", **(oak_args or {})}
-        return IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(os.path.join(
-                get_package_share_directory("depthai_ros_driver"), "launch", "camera.launch.py"
-            )),
-            launch_arguments=arguments.items(),
-        )
-    return IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([os.path.join(
-            get_package_share_directory("realsense2_camera"), "launch", "rs_launch.py"
-        )]),
-        launch_arguments=(realsense_args or {}).items(),
-    )

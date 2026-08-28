@@ -15,7 +15,8 @@ _LAUNCH_DIR = os.path.dirname(__file__)
 if _LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _LAUNCH_DIR)
 
-from handeye_launch_utils import camera_launch, default_storage_directory, load_handeye_profile  # noqa: E402
+from myrobot_common.camera.launch import camera_launch
+from handeye_launch_utils import default_storage_directory, load_handeye_profile  # noqa: E402
 
 
 _DEFAULTS = {

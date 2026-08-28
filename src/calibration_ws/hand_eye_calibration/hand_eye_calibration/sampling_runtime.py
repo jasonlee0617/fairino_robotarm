@@ -17,9 +17,9 @@ from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import Bool
 import tf2_ros
 
-from manipulation_common.planning.motion_executor import MoveItMotion
-from manipulation_common.task.abort_manager import AbortManager
-from manipulation_common.utils.pose_tools import PoseTools
+from myrobot_common.planning.motion_executor import MoveItMotion
+from myrobot_common.task.abort_manager import AbortManager
+from myrobot_common.utils.pose_tools import PoseTools
 
 from .solver import TransformMatrix, robot_pose_for_calibration
 from .vision import (

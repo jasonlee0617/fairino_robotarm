@@ -46,7 +46,7 @@ from ament_index_python.packages import get_package_share_directory
 from pymoveit2 import MoveIt2
 from scipy.spatial.transform import Rotation as R
 from pathplanning_scene_tools import SceneEnvironmentManager, SceneLoader
-from manipulation_common.planning.motion_executor import PlannerSwitch
+from myrobot_common.planning.motion_executor import PlannerSwitch
 from planning_benchmark import (
     obstacle_attr, obstacle_center, obstacle_half_extents, select_farthest_goals,
     write_results, write_summary,

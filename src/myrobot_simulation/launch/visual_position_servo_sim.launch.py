@@ -23,7 +23,7 @@ if _GZ_SHARE not in sys.path:
 from launch_utils.moveit_stack import build_moveit_config  # noqa: E402
 from launch_utils.d435_profile import d435_mappings  # noqa: E402
 from launch_utils.robot_profiles import load_robot_profile  # noqa: E402
-from manipulation_common.launch_utils.yaml_loader import (  # noqa: E402
+from myrobot_common.launch_utils.yaml_loader import (  # noqa: E402
     launch_parameter_value,
     load_launch_parameters_yaml,
     load_yaml,

@@ -3,7 +3,7 @@ from typing import Dict
 
 import numpy as np
 
-from manipulation_common.utils.params import param
+from myrobot_common.utils.params import param
 from visual_grasping_bringup.task.task_types import TargetType
 
 

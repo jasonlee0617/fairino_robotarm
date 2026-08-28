@@ -115,7 +115,7 @@ def ros_node():
 
 class TestWaitClientReady:
     def test_service_ready_returns_true(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         arm = _FakeArm(has_service=True, service_available=True)
         m = MoveItMotion(
             node=ros_node,
@@ -126,7 +126,7 @@ class TestWaitClientReady:
         assert m.wait_client_ready() is True
 
     def test_service_timeout_returns_false(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         arm = _FakeArm(has_service=True, service_available=False)
         m = MoveItMotion(
             node=ros_node,
@@ -138,7 +138,7 @@ class TestWaitClientReady:
 
     def test_no_service_attr_returns_true_no_exception(self, ros_node):
         """Arm without _plan_kinematic_path_service should not crash."""
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         arm = _FakeArm(has_service=False)
         m = MoveItMotion(
             node=ros_node,
@@ -151,7 +151,7 @@ class TestWaitClientReady:
         assert result is True
 
     def test_blocked_motion_rejects_joint_move(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         arm = _FakeArm(has_service=False)
         m = MoveItMotion(
             node=ros_node,
@@ -163,7 +163,7 @@ class TestWaitClientReady:
         assert m.move_to_joints([0.0], timeout_sec=0.1) is False
 
     def test_joint_move_uses_bounded_async_plan_then_execute(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         arm = _ConfigurationMoveIt()
         m = MoveItMotion(
             node=ros_node,
@@ -178,7 +178,7 @@ class TestWaitClientReady:
         assert arm.executed is arm.trajectory
 
     def test_joint_planning_respects_total_timeout(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         arm = _ConfigurationMoveIt(planning_done=False)
         m = MoveItMotion(
             node=ros_node,
@@ -192,7 +192,7 @@ class TestWaitClientReady:
         assert arm.executed is None
 
     def test_closed_gripper_within_one_millimeter_skips_duplicate_motion(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         gripper = _GripperMoveIt((0.0, 0.0), JointTrajectory())
         motion = MoveItMotion(node=ros_node, arm_clients={}, gripper=gripper, action_delay=0.0)
 
@@ -201,7 +201,7 @@ class TestWaitClientReady:
         assert gripper.executed is None
 
     def test_non_increasing_gripper_trajectory_is_rejected_when_not_at_target(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         trajectory = JointTrajectory()
         trajectory.points = [JointTrajectoryPoint(), JointTrajectoryPoint()]
         gripper = _GripperMoveIt((0.01, -0.01), trajectory)
@@ -211,7 +211,7 @@ class TestWaitClientReady:
         assert gripper.executed is None
 
     def test_cartesian_execution_clears_stale_trajectory_stamp(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         trajectory = _trajectory(37)
         arm = _PoseMoveIt(trajectory)
         motion = MoveItMotion(node=ros_node, arm_clients={"fairino": arm}, action_delay=0.0)
@@ -224,7 +224,7 @@ class TestWaitClientReady:
         assert arm.executed.header.stamp.nanosec == 0
 
     def test_global_execution_preserves_trajectory_stamp(self, ros_node):
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
         trajectory = _trajectory(37)
         arm = _PoseMoveIt(trajectory)
         motion = MoveItMotion(node=ros_node, arm_clients={"fairino": arm}, action_delay=0.0)
@@ -237,7 +237,7 @@ class TestWaitClientReady:
 
     def test_plan_to_pose_forwards_tolerances_and_start_state(self, ros_node):
         from sensor_msgs.msg import JointState
-        from manipulation_common.planning.motion_executor import MoveItMotion
+        from myrobot_common.planning.motion_executor import MoveItMotion
 
         trajectory = JointTrajectory()
         arm = _PoseMoveIt(trajectory)
@@ -256,7 +256,7 @@ class TestWaitClientReady:
 
 
 def test_ik_client_and_pipeline_are_independent_valid_choices():
-    from manipulation_common.planning.motion_executor import PlannerSwitch
+    from myrobot_common.planning.motion_executor import PlannerSwitch
 
     for ik, pipeline, planner in (
         ("fairino", "fairino", "tube_birrt*"),
