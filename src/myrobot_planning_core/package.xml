@@ -6,7 +6,7 @@
   <version>1.0.0</version>
   <description>
     Pure C++ core library for Fairino robot path planning.
-    BiRRT*/RRT*, analytical IK, mixed sampler, nanoflann tree.
+    BiRRT*/RRT*, analytical IK, and nanoflann tree.
   </description>
 
   <maintainer email="developer@example.com">developer</maintainer>

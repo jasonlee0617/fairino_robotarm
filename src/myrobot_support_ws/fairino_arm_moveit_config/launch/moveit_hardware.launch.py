@@ -216,10 +216,12 @@ def generate_launch_description():
         _planning_config(filename)
         for filename in (
             "common_planning_params.yaml",
+            "mire_biait*_params.yaml",
             "aapf_birrt*_params.yaml",
-            "tube_birrt*_params.yaml",
             "birrt*_params.yaml",
+            "rrt_params.yaml",
             "rrt*_params.yaml",
+            "prm_params.yaml",
             "ik_params.yaml",
         )
     ]

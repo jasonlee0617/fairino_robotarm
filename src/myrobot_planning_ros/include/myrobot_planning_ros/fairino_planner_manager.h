@@ -1,8 +1,9 @@
 // myrobot_planning_ros/include/myrobot_planning_ros/fairino_planner_manager.h
-// MoveIt2 规划器插件管理器：为 Fairino 机器人提供 aapf_birrt*/tube_birrt*/birrt*/rrt*
+// MoveIt2 规划器插件管理器：为 Fairino 机器人提供自定义关节空间规划器。
 
 #pragma once
 
+#include <atomic>
 #include <moveit/planning_interface/planning_interface.h>
 #include <moveit/planning_scene/planning_scene.h>
 #include <moveit/robot_state/robot_state.h>
@@ -11,8 +12,11 @@
 
 #include <myrobot_planning_core/algorithms/aapf_bi_rrt_star.h>
 #include <myrobot_planning_core/algorithms/bi_rrt_star.h>
+#include <myrobot_planning_core/algorithms/mire_bi_ait_star.h>
+#include <myrobot_planning_core/algorithms/informed_rrt_star.h>
+#include <myrobot_planning_core/algorithms/prm.h>
+#include <myrobot_planning_core/algorithms/rrt.h>
 #include <myrobot_planning_core/algorithms/rrt_star.h>
-#include <myrobot_planning_core/algorithms/tube_bi_rrt_star.h>
 #include <myrobot_planning_core/ik/fairino_ik.h>
 #include <myrobot_planning_core/ik/ik_selector.h>
 #include <myrobot_planning_core/dh_kinematics.h>
@@ -28,7 +32,7 @@ class FairinoPlanningContext : public planning_interface::PlanningContext {
 public:
     /// @param name  上下文名称（通常为规划器名称）
     /// @param group 规划组名称（如 "arm_group"）
-    /// @param algorithm 实际执行规划的核心算法（aapf_birrt* / tube_birrt* / birrt* / rrt*）
+    /// @param algorithm 实际执行规划的核心算法。
     FairinoPlanningContext(const std::string& name,
                            const std::string& group,
                            std::shared_ptr<PlanningAlgorithm> algorithm,
@@ -49,6 +53,7 @@ public:
 private:
     std::shared_ptr<PlanningAlgorithm> algorithm_;  ///< 持有的规划算法实例
     v2::PipelineOptions pipeline_options_;
+    std::shared_ptr<std::atomic_bool> cancel_requested_;
 };
 
 /// @brief 规划器管理器：MoveIt2 插件的主入口，负责创建规划上下文
@@ -72,16 +77,19 @@ public:
 
     /// @brief 返回规划器的描述字符串（用于 MoveIt 界面显示）
     std::string getDescription() const override {
-        return "Fairino Custom aapf_birrt*/tube_birrt*/birrt*/rrt* Planner";
+        return "Fairino custom joint-space planner";
     }
 
     /// @brief 返回此规划器支持的所有算法名称（用于 MoveIt 选择）
     void getPlanningAlgorithms(std::vector<std::string>& algs) const override {
         algs.clear();
+        algs.push_back("mire_biait*");
         algs.push_back("aapf_birrt*");
-        algs.push_back("tube_birrt*");
         algs.push_back("birrt*");
+        algs.push_back("rrt");
         algs.push_back("rrt*");
+        algs.push_back("informed_rrt*");
+        algs.push_back("prm");
     }
 
     /// @brief 设置规划器配置（从 ROS 参数服务器读取）
@@ -112,9 +120,11 @@ private:
     PlanningParams params_;                            ///< 默认核心规划参数（步长、迭代次数等）
     PlannerConfig planner_config_;
     PlannerConfig aapf_birrt_planner_config_;
-    PlannerConfig tube_birrt_planner_config_;
+    PlannerConfig mire_biait_planner_config_;
     PlannerConfig birrt_planner_config_;
     PlannerConfig rrt_planner_config_;
+    PlannerConfig rrt_star_planner_config_;
+    PlannerConfig prm_planner_config_;
     v2::PipelineOptions pipeline_options_;
     Transform4d flange_to_tool_{Transform4d::Identity()};
     planning_interface::PlannerConfigurationMap planner_configs_;  ///< 规划器配置映射

@@ -23,7 +23,7 @@ nodes:
       marker_pose_timeout_sec: 0.5
       arm_max_velocity: 0.2
       arm_max_acceleration: 0.2
-      allowed_planning_time: 15.0
+      allowed_planning_time: 30.0
       position_tolerance: 0.005
       orientation_tolerance: 0.005
       allowed_start_tolerance: 0.1
@@ -42,7 +42,7 @@ nodes:
         pipeline:
           default: fairino
         planner:
-          default: tube_birrt*
+          default: birrt*
         readiness:
           timeout_sec: 10.0
           allow_cross_client_fallback: false

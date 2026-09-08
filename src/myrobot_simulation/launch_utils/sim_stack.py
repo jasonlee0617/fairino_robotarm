@@ -39,8 +39,10 @@ def sim_resource_path(profile: RobotProfile):
     )
 
 
-def sim_node(world: str):
+def sim_node(world: str, *, headless: bool = False):
     gz_args = "empty.sdf -r" if world == "empty" else f"{world}.sdf -r"
+    if headless:
+        gz_args = f"{gz_args} -s"
     return IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory("ros_gz_sim"), "launch", "gz_sim.launch.py")
@@ -118,6 +120,9 @@ def base_simulation_actions(
     controller_spawn_delay: float = 8.0,
     planner_random_seed: int = 0,
     moveit_clients: Tuple[str, ...] = ("fairino", "kdl"),
+    fairino_ik_task_profile: str = "grasp",
+    benchmark_goal_root_mode: str = "",
+    benchmark_comparison: Optional[Dict[str, object]] = None,
     extra_mappings: Optional[Dict[str, str]] = None,
 ):
     moveit_config = build_moveit_config(
@@ -133,10 +138,21 @@ def base_simulation_actions(
 
     actions = [
         sim_resource_path(profile),
-        sim_node(world),
+        # Benchmark launches disable RViz and must not start Gazebo's Qt GUI.
+        # Interactive launches retain the existing GUI behavior.
+        sim_node(world, headless=not enable_rviz),
         clock_bridge_node(use_sim_time),
         robot_state_publisher_node(moveit_config, use_sim_time, publish_frequency),
-        *move_group_nodes(moveit_config, profile, use_sim_time, planner_random_seed, moveit_clients),
+        *move_group_nodes(
+            moveit_config,
+            profile,
+            use_sim_time,
+            planner_random_seed,
+            moveit_clients,
+            fairino_ik_task_profile,
+            benchmark_goal_root_mode,
+            benchmark_comparison,
+        ),
         TimerAction(period=max(0.0, robot_spawn_delay), actions=[robot_spawn]),
         TimerAction(period=max(0.0, controller_spawn_delay), actions=controller_spawners),
     ]

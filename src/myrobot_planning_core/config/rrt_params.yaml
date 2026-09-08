@@ -1,0 +1,9 @@
+fairino:
+  algorithms:
+    rrt:
+      max_iterations: 3000
+      post_solution_sample_attempts: 50
+      max_step: 0.20
+      goal_threshold: 0.08
+      goal_bias: 0.20
+      validation_distance: 0.05

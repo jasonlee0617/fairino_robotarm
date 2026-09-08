@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -13,6 +14,10 @@
 namespace fairino_planning::v2 {
 
 struct PipelineOptions {
+    double planning_deadline_s{30.0};
+    std::string goal_root_mode{"multi_root"};
+    std::function<bool()> cancel_requested;
+    std::vector<double> anytime_checkpoints_s{0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0};
     bool use_multi_obstacle_input{true};
     double min_obstacle_size_threshold{1e-3};
     bool enable_path_optimizer{true};
@@ -31,6 +36,7 @@ struct PipelineOptions {
     Vector3d default_obstacle_origin{0.0, 0.30, 0.10};
     Vector3d default_obstacle_size{0.30, 0.05, 0.20};
     IKSelectParams ik_selector_params{};
+    AnalyticalIKParams analytical_ik_params{};
     PlannerConfig planner_config{};
 };
 

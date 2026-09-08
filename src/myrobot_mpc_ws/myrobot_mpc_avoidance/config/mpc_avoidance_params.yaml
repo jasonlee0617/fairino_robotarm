@@ -1,12 +1,12 @@
 common:
   launch:
     solver_type: nmpc
-    planner_id: tube_birrt*
+    planner_id: birrt*
     ik_plugin: fairino
     planning_pipeline_id: fairino
     arm_max_velocity: 1.0
     arm_max_acceleration: 1.0
-    allowed_planning_time: 15.0
+    allowed_planning_time: 30.0
     position_tolerance: 0.005
     orientation_tolerance: 0.05
     use_sim_time: true
@@ -116,7 +116,7 @@ common:
 
         # --------------------------------------------------------------------------
         # 9) Deadlock / Replan
-        # 本地MPC先恢复；仅持续静态前视碰撞可请求一次Tube-BiRRT重规划。
+        # 本地MPC先恢复；仅持续静态前视碰撞可请求一次 BiRRT* 重规划。
         # APF和避障偏置只用于本地控制，不再作为全局路径失效依据。
         # --------------------------------------------------------------------------
         deadlock_min_progress_per_sec: 0.01

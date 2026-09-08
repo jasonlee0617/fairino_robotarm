@@ -15,7 +15,10 @@ class PlanScoreConfig:
 
 
 class PlannerSwitch:
-    FAIRINO_PLANNERS = {"aapf_birrt*", "tube_birrt*", "birrt*", "rrt*"}
+    FAIRINO_PLANNERS = {
+        "mire_biait*", "aapf_birrt*",
+        "birrt*", "rrt", "rrt*", "informed_rrt*", "prm",
+    }
 
     @staticmethod
     def normalize_pipeline(value: str) -> str:
@@ -41,20 +44,25 @@ class PlannerSwitch:
         key = raw.lower()
         if PlannerSwitch.normalize_pipeline(pipeline) == "fairino":
             fairino_aliases = {
+                "mire": "mire_biait*",
+                "mire_biait": "mire_biait*",
+                "mire-biait": "mire_biait*",
+                "mire_biait*": "mire_biait*",
+                "mire-biait*": "mire_biait*",
                 "aapf": "aapf_birrt*",
                 "aapf_birrt": "aapf_birrt*",
                 "aapf-birrt": "aapf_birrt*",
                 "aapf_birrt*": "aapf_birrt*",
                 "aapf-birrt*": "aapf_birrt*",
-                "tube": "tube_birrt*",
-                "tube_birrt": "tube_birrt*",
-                "tube-birrt": "tube_birrt*",
-                "tube_birrt*": "tube_birrt*",
-                "tube-birrt*": "tube_birrt*",
                 "birrt": "birrt*",
                 "birrt*": "birrt*",
-                "rrt": "rrt*",
+                "rrt": "rrt",
                 "rrt*": "rrt*",
+                "informed_rrt": "informed_rrt*",
+                "informed-rrt": "informed_rrt*",
+                "informed_rrt*": "informed_rrt*",
+                "informed-rrt*": "informed_rrt*",
+                "prm": "prm",
             }
             return fairino_aliases.get(key, raw)
         if key in ("rrtconnect", "rrtconnectfast", "rrtconnectkconfigdefault"):
@@ -182,7 +190,8 @@ class MoveItMotion:
         if not PlannerSwitch.is_valid(normalized_pipeline, normalized_planner):
             self.node.get_logger().error(
                 f"Unsupported planner command: pipeline={pipeline}, algorithm={raw}. "
-                "Fairino supports aapf_birrt*, tube_birrt*, birrt*, rrt*."
+                "Fairino supports mire_biait*, aapf_birrt*, "
+                "birrt*, rrt, rrt*, informed_rrt*, prm."
             )
             return False
 
@@ -211,7 +220,7 @@ class MoveItMotion:
             return
         self.node.get_logger().warn(
             "Unsupported planner command. Use 'ik fairino', 'ik kdl', "
-            "'planner fairino tube_birrt*', or 'planner ompl RRTConnect'."
+            "'planner fairino birrt*', or 'planner ompl RRTConnect'."
         )
 
     def plan_to_pose(

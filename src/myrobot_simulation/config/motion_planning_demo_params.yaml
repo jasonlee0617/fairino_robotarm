@@ -8,14 +8,55 @@ launch:
   rviz_config: ''
   ik_plugin: fairino
   planning_pipeline_id: fairino
-  planner_id: aapf_birrt*
+  planner_id: mire_biait*  #birrt*|rrt*|aapf_birrt*|informed_rrt*|prm|mire_biait*|prm
+  allowed_planning_time: 30.0
   move_group_ready_timeout_sec: 3.0
-  run_mode: interactive
-    # 可选值：interactive / benchmark_execution / benchmark_algorithm
+  run_mode: benchmark_execution  # Options: interactive | goal_collection | benchmark_execution | benchmark_algorithm
+    # 可选值：interactive / goal_collection / benchmark_execution / benchmark_algorithm
     # interactive：交互模式，用户按下 Enter 键后执行每个动作。
-    # benchmark_execution：执行完整 HOME -> goal -> HOME 闭环并记录结果。
-    # benchmark_algorithm：先回 HOME 一次，仅统计规划算法结果，不执行目标轨迹。
-  benchmark_output_dir: $HOME/sample_data/trajectory_plan_benchmark_sample
+    # goal_collection：只采集并校验可复用的终点位姿，不调用轨迹规划器。
+    # benchmark_execution：执行完整 start -> goal -> start 闭环并记录结果。
+    # benchmark_algorithm：先到 start 一次，仅统计规划算法结果，不执行目标轨迹。
+  goal_collection_dir: $HOME/myrobot_matlab/sample_data/sample_data_ros/benchmark_goal_collection
+  benchmark_output_dir: $HOME/myrobot_matlab/sample_data/sample_data_ros/trajectory_plan_benchmark_sample
+  benchmark_variant: full
+  benchmark_goal_root_mode: multi_root
+  start_joints: -1.1170,-1.6214,1.5465,-1.5877,-1.6368,0.0
+  start_id: home
+
+benchmark:
+  comparison:
+    max_iterations: 3000
+    planning_deadline_s: 15.0
+    post_solution_sample_attempts: 50
+    anytime_checkpoints_s: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0]
+    validation_distance: 0.03
+    # Benchmark compares raw planner output; ordinary planning keeps its default optimizer.
+    enable_path_optimizer: false
+    final_validation:
+      distance: 0.03
+      fail_open: false
+  scene:
+    scene_name: dense_obstacle_3d_avoidance-3
+    planning_scene_obstacle_padding_m: 0.03
+    spawn_sim_scene_models: true
+    publish_planning_scene: true
+    publish_obstacle_markers: true
+    obstacle_marker_topic: /demo_pathplanning/obstacle_markers
+  goals:
+    repetitions: 30
+    mode: adaptive_obstacle_challenge_region
+    ik_mode: continuous
+    goal_root_mode: multi_root  # single_root | multi_root
+    seed: 29 #实验变量：7 / 17 / 29
+    target_rpy_deg: [0, -180, 0]
+    clearance_min_m: 0.03
+    clearance_max_m: 0.08
+    corridor_clearance_max_m: 0.10
+    min_separation_m: 0.04
+    state_validity_timeout_s: 2.0
+  random:
+    planner_seed: 29  # 实验变量：7 / 17 / 29
 
 nodes:
   motion_planning_node_sim:
@@ -24,31 +65,9 @@ nodes:
       base_frame_name: base_link
       ee_frame_name: tool0
       joint_names: j1,j2,j3,j4,j5,j6
-      home_joints: -1.1170,-1.6214,1.5465,-1.5877,-1.6368,0.0
-      home_settle_timeout_s: 6.0
-      target_rpy_deg: 0,-180,0
-      go_home_before_demo: false
+      start_settle_timeout_s: 6.0
+      allowed_planning_time: 30.0
+      go_start_before_demo: false
       auto_add_obstacle: true
       remove_obstacle_after_demo: true
-      obstacle_name: birrt_test_obstacle
-      obstacle_position: 0.35,0.05,0.28
-      obstacle_size: 0.18,0.45,0.35
-      obstacle_boxes: ''
-      scene_name: multi_obstacle_3d_avoidance
-      spawn_sim_scene_models: true
-      publish_planning_scene: true
-      publish_obstacle_markers: true
-      obstacle_marker_topic: /demo_pathplanning/obstacle_markers
-      planning_scene_obstacle_padding_m: 0.03
-      benchmark_repetitions: 20
-      benchmark_case_label: multi_obstacle_3d_avoidance_seed17
       benchmark_startup_joint_state_timeout_s: 90.0
-      benchmark_goal_mode: adaptive_obstacle_challenge_region
-      benchmark_goal_seed: 17
-      planner_random_seed: 7
-      benchmark_goal_clearance_min_m: 0.06
-      benchmark_goal_clearance_max_m: 0.14
-      benchmark_goal_corridor_clearance_max_m: 0.10
-      benchmark_goal_min_separation_m: 0.04
-      benchmark_goal_candidate_count: 4096
-      benchmark_goal_state_validity_timeout_s: 2.0

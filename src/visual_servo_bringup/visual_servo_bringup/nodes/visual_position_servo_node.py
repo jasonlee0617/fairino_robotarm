@@ -226,7 +226,7 @@ class VisualPositionServoNode(Node):
         self.max_step_size = param_f(self, "max_step_size", 0.05)
         self.arm_max_velocity = param_f(self, "arm_max_velocity", 0.2)
         self.arm_max_acceleration = param_f(self, "arm_max_acceleration", 0.2)
-        self.allowed_planning_time = param_f(self, "allowed_planning_time", 15.0)
+        self.allowed_planning_time = param_f(self, "allowed_planning_time", 30.0)
         self.position_tolerance = param_f(self, "position_tolerance", 0.005)
         self.orientation_tolerance = param_f(self, "orientation_tolerance", 0.005)
 

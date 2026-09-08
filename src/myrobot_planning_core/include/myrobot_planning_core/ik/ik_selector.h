@@ -51,6 +51,8 @@ struct IKSelectParams {
     double hint_seed_sync_max_rad = 0.50;
     double cartesian_stream_max_pos_step_m = 0.03;
     double cartesian_stream_max_rot_step_rad = 0.35;
+    int continuous_max_goal_roots = 4;
+    double continuous_goal_root_min_separation_rad = 0.3;
 
     // ── Group 3: posture ──
     double upper_arm_min_z_soft   = 0.12;

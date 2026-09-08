@@ -39,7 +39,7 @@ class ArucoMarkerFollower(Node):
         self.marker_pose_timeout_sec = self._float("marker_pose_timeout_sec", 0.5)
         self.arm_max_velocity = self._float("arm_max_velocity", 0.2)
         self.arm_max_acceleration = self._float("arm_max_acceleration", 0.2)
-        self.allowed_planning_time = self._float("allowed_planning_time", 15.0)
+        self.allowed_planning_time = self._float("allowed_planning_time", 30.0)
         self.position_tolerance = self._float("position_tolerance", 0.005)
         self.orientation_tolerance = self._float("orientation_tolerance", 0.005)
         self.allowed_start_tolerance = self._float("allowed_start_tolerance", 0.1)
@@ -79,7 +79,7 @@ class ArucoMarkerFollower(Node):
         self.motion.set_ik(self.ik_plugin)
         self.motion.set_planner(
             self._string("planning_pipeline_id", "fairino"),
-            self._string("planner_id", "tube_birrt*"),
+            self._string("planner_id", "birrt*"),
         )
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)

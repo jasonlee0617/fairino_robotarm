@@ -2,18 +2,13 @@ fairino:
   algorithms:
     rrt_star:
       max_iterations: 3000
+      post_solution_sample_attempts: 50
       max_step: 0.20
       goal_threshold: 0.08
       goal_bias: 0.20
       gamma: 1.5
       max_rewire_radius: 0.25
       max_near: 20
-      continue_after_goal: true
-      rewire_after_goal_iters: 50
       validation_distance: 0.05
       rewire_every_k: 3
       rewire_max_neighbors: 5
-
-      termination:
-        stale_improve_break_iters: 100
-        min_iters_after_goal_before_stale_break: 50

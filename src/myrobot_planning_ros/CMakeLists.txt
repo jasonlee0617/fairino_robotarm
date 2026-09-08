@@ -147,9 +147,16 @@ endif()
 # ─── 测试 ───
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
   set(ament_cmake_cpplint_FOUND TRUE)
   set(ament_cmake_uncrustify_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_gtest(test_moveit_collision_checker
+    test/test_moveit_collision_checker.cpp
+  )
+  target_link_libraries(test_moveit_collision_checker ${PROJECT_NAME})
+  ament_target_dependencies(test_moveit_collision_checker ${THIS_PACKAGE_DEPS})
 endif()
 
 # ─── ament 导出 ───

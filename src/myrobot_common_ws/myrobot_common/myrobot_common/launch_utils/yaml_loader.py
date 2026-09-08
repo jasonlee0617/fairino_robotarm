@@ -119,7 +119,7 @@ def flatten_moveit_parameters(moveit: Dict[str, Any]) -> Dict[str, Any]:
         "move_group_ns_kdl": namespaces.get("kdl", "/move_group_kdl"),
         "ik_plugin": ik.get("default", "fairino"),
         "planning_pipeline_id": pipeline.get("default", "fairino"),
-        "planner_id": planner.get("default", "tube_birrt*"),
+        "planner_id": planner.get("default", "birrt*"),
         "move_group_ready_timeout_sec": readiness.get("timeout_sec", 10.0),
         "allow_cross_client_fallback": readiness.get("allow_cross_client_fallback", True),
         "ik_moveit_servo": moveit.get("ik_moveit_servo", "kdl"),

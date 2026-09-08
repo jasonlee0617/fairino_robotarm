@@ -67,10 +67,12 @@ def planning_parameter_configs(profile: RobotProfile) -> Dict[str, Any]:
             profile.moveit_config_package, "config/sensors_3d.yaml"
         ),
         "planning_core": load_yaml("myrobot_planning_core", "config/common_planning_params.yaml"),
+        "mire_biait_star_core": load_yaml("myrobot_planning_core", "config/mire_biait*_params.yaml"),
         "aapf_birrt_star_core": load_yaml("myrobot_planning_core", "config/aapf_birrt*_params.yaml"),
-        "tube_birrt_star_core": load_yaml("myrobot_planning_core", "config/tube_birrt*_params.yaml"),
         "birrt_star_core": load_yaml("myrobot_planning_core", "config/birrt*_params.yaml"),
+        "rrt_core": load_yaml("myrobot_planning_core", "config/rrt_params.yaml"),
         "rrt_star_core": load_yaml("myrobot_planning_core", "config/rrt*_params.yaml"),
+        "prm_core": load_yaml("myrobot_planning_core", "config/prm_params.yaml"),
         "ik_core": load_yaml("myrobot_planning_core", "config/ik_params.yaml"),
         "cartesian_path_planner": load_yaml(
             "myrobot_planning_core", "config/cartesian_path_planner_params.yaml"
@@ -91,6 +93,53 @@ def robot_description_with_package_paths(moveit_config, profile: RobotProfile) -
             return m.group(0)
 
     return re.sub(r'package://([^/]+)', resolve, description)
+
+
+def benchmark_protocol_params(comparison: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build benchmark-only fairness overrides from the demo YAML."""
+    if not comparison:
+        return {}
+    max_iterations = int(comparison["max_iterations"])
+    validation_distance = float(comparison["validation_distance"])
+    planning_deadline_s = float(comparison["planning_deadline_s"])
+    post_solution_sample_attempts = int(comparison["post_solution_sample_attempts"])
+    anytime_checkpoints_s = [float(value) for value in comparison["anytime_checkpoints_s"]]
+    variant = str(comparison.get("mire_ablation_variant", "full"))
+    if variant not in ("full", "cost_only_queue", "eager_edge_validation", "cost_only_eager"):
+        raise ValueError("invalid MIRE ablation variant")
+    final_validation = comparison.get("final_validation", {})
+    algorithms = {
+        name: {
+            "max_iterations": max_iterations,
+            "validation_distance": validation_distance,
+            "post_solution_sample_attempts": post_solution_sample_attempts,
+        }
+        for name in (
+            "mire_biait_star", "aapf_birrt_star", "birrt_star",
+            "rrt_star", "prm",
+        )
+    }
+    algorithms["mire_biait_star"].update({
+        "ablation_variant": variant,
+        "enable_effort_focal_queue": bool(comparison["mire_enable_effort_focal_queue"]),
+        "enable_lazy_edge_validation": bool(comparison["mire_enable_lazy_edge_validation"]),
+    })
+    return {
+        "fairino": {
+            "planner": {
+                "enable_path_optimizer": bool(comparison.get("enable_path_optimizer", False)),
+                "final_validation_fail_open": bool(final_validation.get("fail_open", False)),
+            },
+            "safety": {
+                "final_validation_distance": float(final_validation.get("distance", validation_distance)),
+            },
+            "benchmark": {
+                "planning_deadline_s": planning_deadline_s,
+                "anytime_checkpoints_s": anytime_checkpoints_s,
+            },
+            "algorithms": algorithms
+        }
+    }
 
 
 def rviz_node(moveit_config, profile: RobotProfile, rviz_config: str, use_sim_time: bool, move_group_client: str = "fairino"):
@@ -123,11 +172,25 @@ def rviz_node(moveit_config, profile: RobotProfile, rviz_config: str, use_sim_ti
     )
 
 
-def move_group_nodes(moveit_config, profile: RobotProfile, use_sim_time: bool, planner_random_seed: int = 0, clients=("fairino", "kdl")):
+def move_group_nodes(
+    moveit_config,
+    profile: RobotProfile,
+    use_sim_time: bool,
+    planner_random_seed: int = 0,
+    clients=("fairino", "kdl"),
+    fairino_ik_task_profile: str = "grasp",
+    benchmark_goal_root_mode: str = "",
+    benchmark_comparison: Optional[Dict[str, Any]] = None,
+):
     """Build only the requested MoveIt client nodes for the selected profile."""
     clients = tuple(clients)
     if not clients or any(client not in ("fairino", "kdl") for client in clients):
         raise ValueError("MoveIt clients must be a non-empty subset of fairino,kdl")
+    fairino_ik_task_profile = fairino_ik_task_profile.strip().lower()
+    if fairino_ik_task_profile not in ("grasp", "continuous"):
+        raise ValueError("Fairino IK task profile must be grasp or continuous")
+    if benchmark_goal_root_mode not in ("", "single_root", "multi_root"):
+        raise ValueError("benchmark goal root mode must be single_root or multi_root")
     params = planning_parameter_configs(profile)
     remappings = [
         ("joint_states", "/joint_states"),
@@ -153,23 +216,30 @@ def move_group_nodes(moveit_config, profile: RobotProfile, use_sim_time: bool, p
                 f"{profile.hand_controller}/follow_joint_trajectory",
             )
         )
-    fairino_ik_grasp_profile = {"fairino": {"ik": {"task_profile": "grasp"}}}
+    fairino_ik_profile = {"fairino": {"ik": {"task_profile": fairino_ik_task_profile}}}
     fairino_ik_continuous_profile = {"fairino": {"ik": {"task_profile": "continuous"}}}
-    planner_seed_param = {"planner": {"random_seed": int(planner_random_seed)}}
-
+    planner_seed_param = {"fairino": {"planner": {"random_seed": int(planner_random_seed)}}}
+    root_mode_param = {"fairino": {"benchmark": {"goal_root_mode": benchmark_goal_root_mode or "multi_root"}}}
+    if benchmark_goal_root_mode == "single_root":
+        root_mode_param["fairino"]["ik"] = {"continuous": {"max_goal_roots": 1}}
+    protocol_params = benchmark_protocol_params(benchmark_comparison)
     fairino_parameters = [
         moveit_config.to_dict(),
         params["kinematics_fairino"],
         params["sensors_3d"],
         params["fairino_planning"],
         params["planning_core"],
+        params["mire_biait_star_core"],
         params["aapf_birrt_star_core"],
-        params["tube_birrt_star_core"],
         params["birrt_star_core"],
+        params["rrt_core"],
         params["rrt_star_core"],
+        params["prm_core"],
         params["ik_core"],
-        fairino_ik_grasp_profile,
+        fairino_ik_profile,
         planner_seed_param,
+        root_mode_param,
+        *([protocol_params] if protocol_params else []),
         {"use_sim_time": use_sim_time},
     ]
     fairino_cartesian_parameters = [
@@ -184,12 +254,16 @@ def move_group_nodes(moveit_config, profile: RobotProfile, use_sim_time: bool, p
         params["sensors_3d"],
         params["fairino_planning"],
         params["planning_core"],
+        params["mire_biait_star_core"],
         params["aapf_birrt_star_core"],
-        params["tube_birrt_star_core"],
         params["birrt_star_core"],
+        params["rrt_core"],
         params["rrt_star_core"],
+        params["prm_core"],
         params["ik_core"],
         planner_seed_param,
+        root_mode_param,
+        *([protocol_params] if protocol_params else []),
         {"use_sim_time": use_sim_time},
     ]
 

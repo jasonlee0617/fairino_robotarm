@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
 #include "myrobot_planning_core/algorithms/aapf_bi_rrt_star.h"
+#include "myrobot_planning_core/aapf/aapf_adaptive_sampler_selector.h"
 #include "myrobot_planning_core/collision/collision_interface.h"
 #include "myrobot_planning_core/dh_kinematics.h"
 
+#include <array>
+#include <chrono>
 #include <memory>
 #include <limits>
 #include <string>
@@ -13,7 +16,17 @@
 namespace fairino_planning {
 namespace {
 
-class AlwaysValidCollision final : public CollisionInterface {
+class ClearanceCapableCollision : public CollisionInterface {
+public:
+    bool supportsWorldClearance() const override { return true; }
+    ClearanceQueryResult nearestWorldClearance(const JointConfig&, double) const override {
+        ClearanceQueryResult result;
+        result.supported = true;
+        return result;
+    }
+};
+
+class AlwaysValidCollision final : public ClearanceCapableCollision {
 public:
     bool isStateValid(const JointConfig&) const override { return true; }
     bool isMotionValid(const JointConfig&, const JointConfig&, double) const override {
@@ -21,7 +34,7 @@ public:
     }
 };
 
-class AlwaysInvalidCollision final : public CollisionInterface {
+class AlwaysInvalidCollision final : public ClearanceCapableCollision {
 public:
     bool isStateValid(const JointConfig&) const override { return false; }
     bool isMotionValid(const JointConfig&, const JointConfig&, double) const override {
@@ -32,13 +45,14 @@ public:
     mutable int motion_calls = 0;
 };
 
-class RejectAllMotionCollision final : public CollisionInterface {
+class RejectAllMotionCollision final : public ClearanceCapableCollision {
 public:
     RejectAllMotionCollision(JointConfig q_start, JointConfig q_goal)
         : q_start_(std::move(q_start)), q_goal_(std::move(q_goal)) {}
 
     bool isStateValid(const JointConfig&) const override { return true; }
     bool isMotionValid(const JointConfig& from, const JointConfig& to, double) const override {
+        ++motion_calls;
         saw_direct_edge = saw_direct_edge ||
             ((from - q_start_).norm() < 1e-12 && (to - q_goal_).norm() < 1e-12) ||
             ((from - q_goal_).norm() < 1e-12 && (to - q_start_).norm() < 1e-12);
@@ -46,13 +60,14 @@ public:
     }
 
     mutable bool saw_direct_edge = false;
+    mutable int motion_calls = 0;
 
 private:
     JointConfig q_start_;
     JointConfig q_goal_;
 };
 
-class DirectStartGoalEdgeInvalidCollision final : public CollisionInterface {
+class DirectStartGoalEdgeInvalidCollision final : public ClearanceCapableCollision {
 public:
     DirectStartGoalEdgeInvalidCollision(JointConfig q_start, JointConfig q_goal)
         : q_start_(std::move(q_start)), q_goal_(std::move(q_goal)) {}
@@ -70,7 +85,7 @@ private:
     JointConfig q_goal_;
 };
 
-class StartInvalidCollision final : public CollisionInterface {
+class StartInvalidCollision final : public ClearanceCapableCollision {
 public:
     explicit StartInvalidCollision(JointConfig q_start) : q_start_(std::move(q_start)) {}
 
@@ -88,7 +103,7 @@ private:
     JointConfig q_start_;
 };
 
-class RecordingCollision final : public CollisionInterface {
+class RecordingCollision final : public ClearanceCapableCollision {
 public:
     bool isStateValid(const JointConfig&) const override { return true; }
     bool isMotionValid(const JointConfig&, const JointConfig&, double distance) const override {
@@ -97,6 +112,14 @@ public:
     }
 
     mutable std::vector<double> motion_distances;
+};
+
+class UnsupportedClearanceCollision final : public CollisionInterface {
+public:
+    bool isStateValid(const JointConfig&) const override { return true; }
+    bool isMotionValid(const JointConfig&, const JointConfig&, double) const override {
+        return true;
+    }
 };
 
 PlanRequestCore exactGoalRequest(const JointConfig& q_start, const JointConfig& q_goal) {
@@ -109,8 +132,62 @@ PlanRequestCore exactGoalRequest(const JointConfig& q_start, const JointConfig& 
     request.p_start = start_pose.block<3, 1>(0, 3);
     request.p_goal = goal_pose.block<3, 1>(0, 3);
     request.R_target = goal_pose.block<3, 3>(0, 0);
-    request.require_exact_goal_joint_target = true;
+    request.goal_candidates = {q_goal};
+    request.started = std::chrono::steady_clock::now();
+    request.deadline = request.started + std::chrono::milliseconds(100);
     return request;
+}
+
+void observe(
+    AapfAdaptiveSamplerSelector& selector,
+    AapfSampleSource source,
+    double utility,
+    double elapsed_ms) {
+    selector.observe(source, utility, elapsed_ms);
+}
+
+TEST(AapfAdaptiveSamplerSelectorTest, WarmupIsBalancedAndEveryEighthPullIsGlobal) {
+    AapfAdaptiveSamplerSelector selector(32, 0.7, 8);
+    const std::array<AapfSampleSource, 7> expected{
+        AapfSampleSource::kGuided, AapfSampleSource::kGlobal,
+        AapfSampleSource::kGuided, AapfSampleSource::kGlobal,
+        AapfSampleSource::kGuided, AapfSampleSource::kGlobal,
+        AapfSampleSource::kGuided,
+    };
+    for (const auto source : expected) {
+        EXPECT_EQ(selector.choose(), source);
+        observe(selector, source, 0.0, 1.0);
+    }
+    EXPECT_EQ(selector.choose(), AapfSampleSource::kGlobal);
+}
+
+TEST(AapfAdaptiveSamplerSelectorTest, PrefersUsefulLowCostSource) {
+    AapfAdaptiveSamplerSelector selector(32, 0.7, 0);
+    for (int i = 0; i < 2; ++i) {
+        observe(selector, AapfSampleSource::kGuided, 1.0, 10.0);
+        observe(selector, AapfSampleSource::kGlobal, 1.0, 1.0);
+    }
+    EXPECT_EQ(selector.choose(), AapfSampleSource::kGlobal);
+
+    AapfAdaptiveSamplerSelector guided_selector(32, 0.7, 0);
+    for (int i = 0; i < 2; ++i) {
+        observe(guided_selector, AapfSampleSource::kGuided, 1.0, 1.0);
+        observe(guided_selector, AapfSampleSource::kGlobal, 0.0, 10.0);
+    }
+    EXPECT_EQ(guided_selector.choose(), AapfSampleSource::kGuided);
+}
+
+TEST(AapfAdaptiveSamplerSelectorTest, TreesDoNotShareHistory) {
+    AapfAdaptiveSamplerSelector tree_a(32, 0.7, 0);
+    AapfAdaptiveSamplerSelector tree_b(32, 0.7, 0);
+    for (int i = 0; i < 2; ++i) {
+        observe(tree_a, AapfSampleSource::kGuided, 1.0, 1.0);
+        observe(tree_a, AapfSampleSource::kGlobal, 0.0, 1.0);
+        observe(tree_b, AapfSampleSource::kGuided, 0.0, 1.0);
+        observe(tree_b, AapfSampleSource::kGlobal, 1.0, 1.0);
+    }
+    EXPECT_EQ(tree_a.choose(), AapfSampleSource::kGuided);
+    EXPECT_EQ(tree_b.choose(), AapfSampleSource::kGlobal);
 }
 
 TEST(AapfBiRRTStarTest, ExactGoalDirectPathPreservesEndpoint) {
@@ -127,7 +204,75 @@ TEST(AapfBiRRTStarTest, ExactGoalDirectPathPreservesEndpoint) {
     ASSERT_EQ(result.path.size(), 2U);
     EXPECT_NEAR((result.path.front() - q_start).norm(), 0.0, 1e-12);
     EXPECT_NEAR((result.path.back() - q_goal).norm(), 0.0, 1e-12);
-    EXPECT_EQ(result.iterations, 0);
+    EXPECT_NEAR(result.path_cost, 0.1, 1e-12);
+}
+
+TEST(AapfBiRRTStarTest, FixedPostSolutionSamplingBudgetStopsAfterExactAttemptCount) {
+    const JointConfig q_start = JointConfig::Zero();
+    JointConfig q_goal = JointConfig::Zero();
+    q_goal[0] = 0.1;
+    auto request = exactGoalRequest(q_start, q_goal);
+
+    PlanningParams params;
+    params.max_iterations = 20;
+    params.post_solution_sample_attempts = 3;
+    params.aapf.enable = false;
+    AapfBiRRTStar planner;
+    planner.setParams(params);
+    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+    const PlanResult result = planner.plan(request);
+
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_EQ(result.sample_attempts, 3);
+    EXPECT_EQ(result.effort_stats.post_solution_sample_attempts, 3);
+    EXPECT_TRUE(result.effort_stats.post_solution_budget_complete);
+}
+
+TEST(AapfBiRRTStarTest, EnabledGuidanceRequiresClearanceCapability) {
+    const JointConfig q_start = JointConfig::Zero();
+    JointConfig q_goal = JointConfig::Zero();
+    q_goal[0] = 0.1;
+
+    AapfBiRRTStar planner;
+    planner.setCollisionChecker(std::make_shared<UnsupportedClearanceCollision>());
+    const PlanResult result = planner.plan(exactGoalRequest(q_start, q_goal));
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.failure_code, PlanningFailureCode::kInvalidInput);
+    EXPECT_NE(result.message.find("clearance"), std::string::npos);
+}
+
+TEST(AapfBiRRTStarTest, GlobalOnlyAblationDoesNotRequireClearanceCapability) {
+    const JointConfig q_start = JointConfig::Zero();
+    JointConfig q_goal = JointConfig::Zero();
+    q_goal[0] = 0.1;
+    PlanningParams params;
+    params.aapf.enable = false;
+
+    AapfBiRRTStar planner;
+    planner.setParams(params);
+    planner.setCollisionChecker(std::make_shared<UnsupportedClearanceCollision>());
+    const PlanResult result = planner.plan(exactGoalRequest(q_start, q_goal));
+
+    EXPECT_TRUE(result.success) << result.message;
+}
+
+TEST(AapfBiRRTStarTest, MultiRootDirectPathUsesShortestValidCandidate) {
+    const JointConfig q_start = JointConfig::Zero();
+    JointConfig q_preferred = JointConfig::Zero();
+    JointConfig q_alternate = JointConfig::Zero();
+    q_preferred[0] = 0.2;
+    q_alternate[0] = 0.1;
+
+    auto request = exactGoalRequest(q_start, q_preferred);
+    request.goal_candidates = {q_preferred, q_alternate};
+
+    AapfBiRRTStar planner;
+    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+    const PlanResult result = planner.plan(request);
+
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_NEAR((result.path.back() - q_alternate).norm(), 0.0, 1e-12);
     EXPECT_NEAR(result.path_cost, 0.1, 1e-12);
 }
 
@@ -172,12 +317,6 @@ TEST(AapfBiRRTStarTest, ExactGoalSearchStillUsesAapfGuidance) {
     params.max_iterations = 500;
     params.max_step = 0.12;
     params.connect_max_steps = 20;
-    params.continue_after_goal = false;
-    params.tube_every_k = 0;
-    params.aapf.guided_every_k = 1;
-    params.aapf.max_guided_ik_tries = 5;
-    params.aapf.finalization_reserve_ms = 100;
-
     AapfBiRRTStar planner;
     planner.setParams(params);
     planner.setCollisionChecker(
@@ -187,13 +326,58 @@ TEST(AapfBiRRTStarTest, ExactGoalSearchStillUsesAapfGuidance) {
     request.random_seed = 17;
     const PlanResult result = planner.plan(request);
 
-    ASSERT_TRUE(result.success) << result.message << " " << result.diagnostics;
+    ASSERT_TRUE(result.success) << result.message;
     ASSERT_GE(result.path.size(), 2U);
     EXPECT_NEAR((result.path.front() - q_start).norm(), 0.0, 1e-12);
     EXPECT_NEAR((result.path.back() - q_goal).norm(), 0.0, 1e-12);
-    EXPECT_NE(result.diagnostics.find("AAPF_DIAG status=success"), std::string::npos);
-    EXPECT_EQ(result.diagnostics.find("sample_aapf=0"), std::string::npos)
-        << result.diagnostics;
+}
+
+TEST(AapfBiRRTStarTest, ContinuesSearchWithinSafetyGuard) {
+    const JointConfig q_start = JointConfig::Zero();
+    JointConfig q_goal = JointConfig::Zero();
+    q_goal[0] = 0.45;
+
+    PlanningParams params;
+    params.max_iterations = 500;
+    params.max_step = 0.12;
+    params.connect_max_steps = 20;
+    AapfBiRRTStar planner;
+    planner.setParams(params);
+    planner.setCollisionChecker(
+        std::make_shared<DirectStartGoalEdgeInvalidCollision>(q_start, q_goal));
+
+    PlanRequestCore request = exactGoalRequest(q_start, q_goal);
+    request.random_seed = 17;
+    const PlanResult result = planner.plan(request);
+
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_LE(result.iterations, params.max_iterations);
+}
+
+TEST(AapfBiRRTStarTest, SingleRequestIterationBudgetDoesNotRestartSearch) {
+    const JointConfig q_start = JointConfig::Zero();
+    JointConfig q_goal = JointConfig::Zero();
+    q_goal[0] = 0.45;
+    const auto collision = std::make_shared<RejectAllMotionCollision>(q_start, q_goal);
+
+    PlanningParams params;
+    params.max_iterations = 1;
+    params.aapf.shrink_motion_attempts = 0;
+    AapfBiRRTStar planner;
+    planner.setParams(params);
+    planner.setCollisionChecker(collision);
+
+    const PlanResult result = planner.plan(exactGoalRequest(q_start, q_goal));
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.iterations, 1) << result.message << " " << result.diagnostics;
+    EXPECT_LE(collision->motion_calls, 2);
+    ASSERT_FALSE(result.sampling_stats.empty());
+    for (const auto& stats : result.sampling_stats) {
+        EXPECT_EQ(stats.insertions, 0);
+        EXPECT_EQ(stats.progress_events, 0);
+        EXPECT_DOUBLE_EQ(stats.utility_sum, 0.0);
+    }
 }
 
 TEST(AapfBiRRTStarTest, RejectsNonFiniteStartBeforeCollisionQueries) {
@@ -240,7 +424,6 @@ TEST(AapfBiRRTStarTest, UsesPlannerValidationDistanceDuringSearch) {
     planner.setParams(params);
     planner.setCollisionChecker(collision);
     PlanRequestCore request = exactGoalRequest(q_start, q_goal);
-    request.require_exact_goal_joint_target = false;
     request.random_seed = 31;
     planner.plan(request);
 
@@ -257,7 +440,6 @@ TEST(AapfBiRRTStarTest, RequestSeedReproducesSearchPath) {
     PlanningParams params;
     params.max_iterations = 1;
     PlanRequestCore request = exactGoalRequest(q_start, q_goal);
-    request.require_exact_goal_joint_target = false;
     request.random_seed = 97;
 
     AapfBiRRTStar first;

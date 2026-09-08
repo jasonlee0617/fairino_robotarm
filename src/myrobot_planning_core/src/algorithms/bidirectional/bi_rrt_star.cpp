@@ -1,6 +1,8 @@
-// src/algorithms/bi_rrt_star.cpp
-// ponytail: minimal BiRRT* baseline, no tube or IK-guided sampling.
+// src/algorithms/bidirectional/bi_rrt_star.cpp
+// ponytail: minimal BiRRT* baseline without IK-guided sampling.
 #include "myrobot_planning_core/algorithms/bi_rrt_star.h"
+#include "../common/bidirectional_utils.hpp"
+#include "myrobot_planning_core/algorithms/search_runtime.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -13,38 +15,12 @@ constexpr double kEpsCostEqual = 1e-12;
 constexpr double kEpsPathDedup = 1e-10;
 constexpr double kEpsJointLimitTol = 1e-4;
 
-bool meaningfulObstacle(const ObstacleInfo& obs) {
-    return obs.size.cwiseAbs().maxCoeff() > 1e-9;
-}
-
 JointConfig jointDelta(const JointConfig& from, const JointConfig& to) { return to - from; }
 double jointDistance(const JointConfig& a, const JointConfig& b) { return jointDelta(a, b).norm(); }
 double jointDistanceSq(const JointConfig& a, const JointConfig& b) { return jointDelta(a, b).squaredNorm(); }
 
-bool isFiniteConfig(const JointConfig& q) {
-    for (int i = 0; i < NUM_JOINTS; ++i) if (!std::isfinite(q[i])) return false;
-    return true;
-}
-
 JointConfig sampleUniform(const JointLimits& limits, std::mt19937& rng) {
     return limits.sampleUniform(rng);
-}
-
-bool validatePath(const CollisionInterface* coll, const std::vector<JointConfig>& path,
-                  double validation_distance, int* bad_segment = nullptr) {
-    if (bad_segment) *bad_segment = -1;
-    if (path.empty() || !isFiniteConfig(path.front()) || !coll->isStateValid(path.front())) {
-        if (bad_segment) *bad_segment = 0;
-        return false;
-    }
-    for (size_t i = 1; i < path.size(); ++i) {
-        if (!isFiniteConfig(path[i]) || !coll->isStateValid(path[i]) ||
-            !coll->isMotionValid(path[i - 1], path[i], validation_distance)) {
-            if (bad_segment) *bad_segment = static_cast<int>(i - 1);
-            return false;
-        }
-    }
-    return true;
 }
 
 }  // namespace
@@ -53,15 +29,7 @@ std::vector<ObstacleInfo> BiRRTStar::normalizeObstacles(
     const Vector3d& obs_origin,
     const Vector3d& obs_size,
     const std::vector<ObstacleInfo>& obstacles) {
-    std::vector<ObstacleInfo> out;
-    for (const auto& obs : obstacles) {
-        if (meaningfulObstacle(obs)) out.push_back(obs);
-    }
-    if (out.empty()) {
-        ObstacleInfo single{obs_origin, obs_size};
-        if (meaningfulObstacle(single)) out.push_back(single);
-    }
-    return out;
+    return bidirectional::normalizeObstacles(obs_origin, obs_size, obstacles);
 }
 
 BiRRTStar::BiRRTStar() : rng_(7) {}
@@ -69,7 +37,9 @@ BiRRTStar::BiRRTStar() : rng_(7) {}
 PlanResult BiRRTStar::plan(const PlanRequestCore& request) {
     setToolModel(request.tool_model);
     const auto obstacles = normalizeObstacles(request.obs_origin, request.obs_size, request.obstacles);
-    return planImpl(request.q_start, request.q_goal, obstacles, request.random_seed);
+    return planImpl(request.q_start,
+        request.goal_candidates.empty() ? std::vector<JointConfig>{request.q_goal} : request.goal_candidates,
+        obstacles, request.random_seed, &request);
 }
 
 PlanResult BiRRTStar::plan(
@@ -79,7 +49,7 @@ PlanResult BiRRTStar::plan(
     (void)p_start;
     (void)p_goal;
     (void)R_target;
-    return planImpl(q_start, q_goal, normalizeObstacles(obs_origin, obs_size, {}), 0);
+    return planImpl(q_start, {q_goal}, normalizeObstacles(obs_origin, obs_size, {}), 0);
 }
 
 PlanResult BiRRTStar::planMultiObs(
@@ -89,14 +59,11 @@ PlanResult BiRRTStar::planMultiObs(
     (void)p_start;
     (void)p_goal;
     (void)R_target;
-    return planImpl(q_start, q_goal, obstacles, 0);
+    return planImpl(q_start, {q_goal}, obstacles, 0);
 }
 
 double BiRRTStar::computeRewireRadius(int n) const {
-    double rr = params_.gamma * std::pow(
-        std::log(std::max(n, 2)) / std::max(n, 2), 1.0 / NUM_JOINTS);
-    return std::min(params_.max_rewire_radius,
-                    std::max(rr, params_.max_step * 1.2));
+    return bidirectional::rewireRadius(params_, n);
 }
 
 BiRRTStar::ConnResult BiRRTStar::tryConnect(
@@ -142,9 +109,10 @@ BiRRTStar::ConnResult BiRRTStar::tryConnect(
 
 PlanResult BiRRTStar::planImpl(
     const JointConfig& q_start,
-    const JointConfig& q_goal,
+    const std::vector<JointConfig>& requested_goal_candidates,
     const std::vector<ObstacleInfo>& obstacles,
-    unsigned int request_seed) {
+    unsigned int request_seed,
+    const PlanRequestCore* request) {
     (void)obstacles;
 
     PlanResult fast_fail;
@@ -154,13 +122,20 @@ PlanResult BiRRTStar::planImpl(
         fast_fail.message = "BiRRT*: null collision checker.";
         return fast_fail;
     }
-    if (!limits_.isWithin(q_start, kEpsJointLimitTol) || !limits_.isWithin(q_goal, kEpsJointLimitTol)) {
+    if (requested_goal_candidates.empty()) {
+        fast_fail.success = false;
+        fast_fail.failure_code = PlanningFailureCode::kInvalidInput;
+        fast_fail.message = "BiRRT*: no goal candidates.";
+        return fast_fail;
+    }
+    const std::vector<JointConfig>& goal_candidates = requested_goal_candidates;
+    if (!limits_.isWithin(q_start, kEpsJointLimitTol)) {
         fast_fail.success = false;
         fast_fail.failure_code = PlanningFailureCode::kInvalidInput;
         fast_fail.message = "BiRRT*: start or goal out of joint limits.";
         return fast_fail;
     }
-    if (!isFiniteConfig(q_start) || !isFiniteConfig(q_goal)) {
+    if (!bidirectional::isFinite(q_start)) {
         fast_fail.success = false;
         fast_fail.failure_code = PlanningFailureCode::kInvalidInput;
         fast_fail.message = "BiRRT*: start or goal contains NaN.";
@@ -172,38 +147,66 @@ PlanResult BiRRTStar::planImpl(
         fast_fail.message = "BiRRT*: start configuration in collision.";
         return fast_fail;
     }
-    if (!collision_->isStateValid(q_goal)) {
-        fast_fail.success = false;
-        fast_fail.failure_code = PlanningFailureCode::kGoalNotReached;
-        fast_fail.message = "BiRRT*: goal configuration in collision.";
-        return fast_fail;
+    for (const auto& q_goal : goal_candidates) {
+        if (!limits_.isWithin(q_goal, kEpsJointLimitTol) || !bidirectional::isFinite(q_goal)) {
+            fast_fail.success = false;
+            fast_fail.failure_code = PlanningFailureCode::kInvalidInput;
+            fast_fail.message = "BiRRT*: goal configuration is non-finite or out of joint limits.";
+            return fast_fail;
+        }
+        if (!collision_->isStateValid(q_goal)) {
+            fast_fail.success = false;
+            fast_fail.failure_code = PlanningFailureCode::kGoalNotReached;
+            fast_fail.message = "BiRRT*: goal configuration in collision.";
+            return fast_fail;
+        }
     }
 
     rng_.seed(static_cast<std::mt19937::result_type>(request_seed == 0 ? 7U : request_seed));
 
     auto t_start = std::chrono::steady_clock::now();
     PlanResult result;
+    SearchRuntime runtime(request, t_start);
 
     const int max_n = params_.max_iterations / 2 + 10;
     RRTTree treeA(max_n), treeB(max_n);
     treeA.addNode(q_start, -1, 0.0);
-    treeB.addNode(q_goal, -1, 0.0);
+    for (const auto& q_goal : goal_candidates) treeB.addNode(q_goal, -1, 0.0);
 
     double best_cost = std::numeric_limits<double>::infinity();
     int best_conn_a = -1, best_conn_b = -1;
-    int first_goal_it = -1, last_improve_it = 0;
+    int first_goal_sample_attempt = -1;
+    const int post_solution_budget = std::max(0, params_.post_solution_sample_attempts);
     int connect_every_k = 1;
     bool grow_a = true;
+    int iterations_completed = 0;
+
+    for (int goal_index = 0; goal_index < static_cast<int>(goal_candidates.size()); ++goal_index) {
+        const double direct_cost = jointDistance(q_start, goal_candidates[goal_index]);
+        if (direct_cost + kEpsCostEqual >= best_cost ||
+            !collision_->isMotionValid(q_start, goal_candidates[goal_index], params_.validation_distance)) {
+            continue;
+        }
+        best_cost = direct_cost;
+        best_conn_a = 0;
+        best_conn_b = goal_index;
+    }
+    if (best_conn_a >= 0) {
+        first_goal_sample_attempt = 0;
+        result.first_solution_time_s = runtime.elapsedSeconds();
+        result.first_solution_path_cost = best_cost;
+    }
 
     for (int it = 1; it <= params_.max_iterations; ++it) {
-        if (std::isfinite(best_cost)) {
-            if (first_goal_it < 0) first_goal_it = it;
-            if ((it - first_goal_it) > params_.rewire_after_goal_iters) break;
-            if ((it - last_improve_it) > params_.stale_improve_break_iters &&
-                (it - first_goal_it) > params_.min_iters_after_goal_before_stale_break) {
-                break;
-            }
+        if (runtime.shouldStop()) break;
+        if (post_solution_budget > 0 && first_goal_sample_attempt >= 0 &&
+            result.sample_attempts - first_goal_sample_attempt >= post_solution_budget) {
+            result.effort_stats.post_solution_budget_complete = true;
+            break;
         }
+        runtime.capture(result, std::isfinite(best_cost), best_cost, treeA.size() + treeB.size());
+        iterations_completed = it;
+        ++result.sample_attempts;
 
         RRTTree& cur = grow_a ? treeA : treeB;
         RRTTree& opp = grow_a ? treeB : treeA;
@@ -258,6 +261,7 @@ PlanResult BiRRTStar::planImpl(
         }
 
         int new_idx = cur.addNode(q_new, best_par, best_c2n);
+        ++result.accepted_samples;
 
         if (it % params_.rewire_every_k == 0) {
             int rw_n = std::min(params_.rewire_max_neighbors, static_cast<int>(near_set.size()));
@@ -312,10 +316,12 @@ PlanResult BiRRTStar::planImpl(
                     best_cost = total;
                     best_conn_a = grow_a ? bridge_parent : conn.idx_other;
                     best_conn_b = grow_a ? conn.idx_other : bridge_parent;
-                    last_improve_it = it;
-                    if (first_goal_it < 0) first_goal_it = it;
+                    if (first_goal_sample_attempt < 0) {
+                        first_goal_sample_attempt = result.sample_attempts;
+                        result.first_solution_time_s = runtime.elapsedSeconds();
+                        result.first_solution_path_cost = best_cost;
+                    }
                     connect_every_k = params_.connect_success_every_k;
-                    if (!params_.continue_after_goal) { grow_a = !grow_a; break; }
                 }
             }
         }
@@ -323,10 +329,18 @@ PlanResult BiRRTStar::planImpl(
         grow_a = !grow_a;
     }
 
+    if (first_goal_sample_attempt >= 0) {
+        result.effort_stats.post_solution_sample_attempts = std::max(
+            0, result.sample_attempts - first_goal_sample_attempt);
+    }
+
     if (best_conn_a < 0) {
         result.success = false;
-        result.failure_code = PlanningFailureCode::kGoalNotReached;
-        result.message = "BiRRT* failed: no connection found.";
+        result.failure_code = runtime.deadlineReached() ? PlanningFailureCode::kTimeout : PlanningFailureCode::kGoalNotReached;
+        result.message = runtime.deadlineReached() ? "deadline_no_solution" : "BiRRT* failed: no connection found.";
+        result.iterations = iterations_completed;
+        result.planning_time = runtime.elapsedSeconds();
+        runtime.markStopReason(result, iterations_completed >= params_.max_iterations);
         return result;
     }
 
@@ -343,7 +357,7 @@ PlanResult BiRRTStar::planImpl(
     result.path.erase(it_dup, result.path.end());
 
     int bad_seg = -1;
-    if (!validatePath(collision_.get(), result.path, params_.validation_distance, &bad_seg)) {
+    if (!bidirectional::strictlyValid(*collision_, result.path, params_.validation_distance, &bad_seg)) {
         result.success = false;
         result.failure_code = PlanningFailureCode::kGoalNotReached;
         result.message = "BiRRT* final path invalid at segment " + std::to_string(bad_seg);
@@ -356,7 +370,9 @@ PlanResult BiRRTStar::planImpl(
     result.planning_time = std::chrono::duration<double>(t_end - t_start).count();
     result.path_cost = best_cost;
     result.num_nodes = treeA.size() + treeB.size();
-    result.iterations = first_goal_it < 0 ? params_.max_iterations : first_goal_it;
+    result.iterations = iterations_completed;
+    runtime.capture(result, true, result.path_cost, result.num_nodes);
+    runtime.markStopReason(result, iterations_completed >= params_.max_iterations);
     return result;
 }
 

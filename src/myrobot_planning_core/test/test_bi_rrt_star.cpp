@@ -1,13 +1,13 @@
 #include <gtest/gtest.h>
 
 #include "myrobot_planning_core/algorithms/bi_rrt_star.h"
-#include "myrobot_planning_core/algorithms/tube_bi_rrt_star.h"
+#include "myrobot_planning_core/algorithms/rrt_star.h"
 #include "myrobot_planning_core/collision/collision_interface.h"
 #include "myrobot_planning_core/dh_kinematics.h"
 
 #include <cmath>
-#include <chrono>
 #include <memory>
+#include <vector>
 
 namespace fairino_planning {
 namespace {
@@ -85,6 +85,13 @@ PlanRequestCore makeRequest(const JointConfig& q_start, const JointConfig& q_goa
     return req;
 }
 
+bool endsAtCandidate(const PlanResult& result, const std::vector<JointConfig>& candidates) {
+    for (const auto& candidate : candidates) {
+        if ((result.path.back() - candidate).norm() < 1e-10) return true;
+    }
+    return false;
+}
+
 // ── Tests ──
 
 TEST(BiRRTStarTest, ExactGoalDirectPathPreservesEndpoint) {
@@ -93,7 +100,6 @@ TEST(BiRRTStarTest, ExactGoalDirectPathPreservesEndpoint) {
     q_goal[0] = 0.1;
 
     auto req = makeRequest(q_start, q_goal);
-    req.require_exact_goal_joint_target = false;
 
     BiRRTStar planner;
     planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
@@ -104,6 +110,86 @@ TEST(BiRRTStarTest, ExactGoalDirectPathPreservesEndpoint) {
     EXPECT_GE(result.path.size(), 2U);
     EXPECT_LT((result.path.front() - q_start).norm(), 1e-10);
     EXPECT_LT((result.path.back() - q_goal).norm(), 1e-10);
+}
+
+TEST(BiRRTStarTest, FixedPostSolutionSamplingBudgetStopsAfterExactAttemptCount) {
+    JointConfig q_goal = JointConfig::Zero();
+    q_goal[0] = 0.1;
+    auto request = makeRequest(JointConfig::Zero(), q_goal);
+    PlanningParams params;
+    params.max_iterations = 20;
+    params.post_solution_sample_attempts = 3;
+
+    BiRRTStar planner;
+    planner.setParams(params);
+    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+    const PlanResult result = planner.plan(request);
+
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_EQ(result.sample_attempts, 3);
+    EXPECT_EQ(result.effort_stats.post_solution_sample_attempts, 3);
+    EXPECT_TRUE(result.effort_stats.post_solution_budget_complete);
+}
+
+TEST(RRTStarTest, DirectPathPreservesEndpoint) {
+    JointConfig goal = JointConfig::Zero();
+    goal[0] = 0.1;
+    RRTStar planner;
+    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+
+    const PlanResult result = planner.plan(makeRequest(JointConfig::Zero(), goal));
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_NEAR((result.path.back() - goal).norm(), 0.0, 1e-12);
+}
+
+TEST(RRTStarTest, FixedPostSolutionSamplingBudgetStopsAfterExactAttemptCount) {
+    JointConfig goal = JointConfig::Zero();
+    goal[0] = 0.1;
+    auto request = makeRequest(JointConfig::Zero(), goal);
+    PlanningParams params;
+    params.max_iterations = 20;
+    params.post_solution_sample_attempts = 3;
+
+    RRTStar planner;
+    planner.setParams(params);
+    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+    const PlanResult result = planner.plan(request);
+
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_EQ(result.sample_attempts, 3);
+    EXPECT_EQ(result.effort_stats.post_solution_sample_attempts, 3);
+    EXPECT_TRUE(result.effort_stats.post_solution_budget_complete);
+}
+
+TEST(SharedGoalCandidatesTest, CustomPlannersCanReachAnyCandidate) {
+    const JointConfig q_start = JointConfig::Zero();
+    JointConfig q_preferred = JointConfig::Zero();
+    JointConfig q_alternate = JointConfig::Zero();
+    q_preferred[0] = 0.10;
+    q_alternate[0] = 0.05;
+    auto request = makeRequest(q_start, q_preferred);
+    request.goal_candidates = {q_preferred, q_alternate};
+
+    PlanningParams params;
+    params.max_iterations = 16;
+    params.max_step = 0.20;
+    params.goal_bias = 1.0;
+
+    const auto check_result = [&](const PlanResult& result) {
+        ASSERT_TRUE(result.success) << result.message;
+        ASSERT_FALSE(result.path.empty());
+        EXPECT_TRUE(endsAtCandidate(result, request.goal_candidates));
+    };
+
+    BiRRTStar birrt;
+    birrt.setParams(params);
+    birrt.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+    check_result(birrt.plan(request));
+
+    RRTStar rrt;
+    rrt.setParams(params);
+    rrt.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+    check_result(rrt.plan(request));
 }
 
 TEST(BiRRTStarTest, RejectsNonFiniteOrOutOfLimitInput) {
@@ -193,11 +279,11 @@ TEST(BiRRTStarTest, BridgeConnectionPathIsFullyValidated) {
     params.max_iterations = 20;
     params.max_step = 0.2;
     params.connect_goal_bias = 1.0;
-    params.continue_after_goal = false;
+    params.goal_bias = 1.0;
 
     BiRRTStar planner;
     planner.setParams(params);
-    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
+    planner.setCollisionChecker(std::make_shared<ShortOnlyCollision>());
     PlanResult result = planner.plan(req);
 
     ASSERT_TRUE(result.success);
@@ -227,73 +313,6 @@ TEST(BiRRTStarTest, RejectedBridgeDoesNotLeavePartialAcceptedPath) {
 
     EXPECT_FALSE(result.success);
     EXPECT_EQ(result.failure_code, PlanningFailureCode::kGoalNotReached);
-}
-
-TEST(TubeBiRRTStarTest, TubeEveryKZeroFallsBackSafely) {
-    JointConfig q_start = JointConfig::Zero();
-    JointConfig q_goal = JointConfig::Zero();
-    q_goal[0] = 0.2;
-    auto req = makeRequest(q_start, q_goal);
-    req.random_seed = 17;
-
-    PlanningParams params;
-    params.max_iterations = 80;
-    params.tube_every_k = 0;
-    params.connect_goal_bias = 1.0;
-    params.continue_after_goal = false;
-
-    TubeBiRRTStar planner;
-    planner.setParams(params);
-    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
-    PlanResult result = planner.plan(req);
-
-    ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.failure_code, PlanningFailureCode::kNone);
-    EXPECT_GE(result.path.size(), 2U);
-}
-
-TEST(TubeBiRRTStarTest, RequestSeedReproducesPath) {
-    JointConfig q_start = JointConfig::Zero();
-    JointConfig q_goal = JointConfig::Zero();
-    q_goal[0] = 0.3;
-    auto req = makeRequest(q_start, q_goal);
-    req.random_seed = 42;
-
-    PlanningParams params;
-    params.max_iterations = 120;
-    params.tube_every_k = 0;
-    params.continue_after_goal = false;
-
-    TubeBiRRTStar planner1;
-    TubeBiRRTStar planner2;
-    planner1.setParams(params);
-    planner2.setParams(params);
-    planner1.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
-    planner2.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
-
-    PlanResult r1 = planner1.plan(req);
-    PlanResult r2 = planner2.plan(req);
-
-    ASSERT_EQ(r1.success, r2.success);
-    if (r1.success) {
-        EXPECT_EQ(r1.path.size(), r2.path.size());
-        EXPECT_NEAR(r1.path_cost, r2.path_cost, 1e-10);
-    }
-}
-
-TEST(TubeBiRRTStarTest, PlanUntilHonorsExpiredDeadline) {
-    JointConfig q_start = JointConfig::Zero();
-    JointConfig q_goal = JointConfig::Zero();
-    q_goal[0] = 0.3;
-    auto req = makeRequest(q_start, q_goal);
-
-    TubeBiRRTStar planner;
-    planner.setCollisionChecker(std::make_shared<AlwaysValidCollision>());
-    const auto deadline = std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
-    const PlanResult result = planner.planUntil(req, deadline);
-
-    EXPECT_FALSE(result.success);
-    EXPECT_NE(result.message.find("deadline"), std::string::npos);
 }
 
 }  // namespace

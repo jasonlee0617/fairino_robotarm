@@ -821,6 +821,12 @@ class MoveIt2:
             )
             return None
 
+    def cancel_plan_future(self, future: Optional[Future]):
+        """Stop waiting for an outstanding kinematic planning service request."""
+        if future is None or future.done():
+            return
+        self._plan_kinematic_path_service.remove_pending_request(future)
+
     def execute(self, joint_trajectory: JointTrajectory):
         """
         Execute joint_trajectory by communicating directly with the controller.

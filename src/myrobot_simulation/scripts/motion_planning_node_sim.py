@@ -5,8 +5,8 @@
 # 提供交互式终端控制，支持：
 #   - 输入目标位姿 (x y z 或 x y z rx ry rz) 进行规划与运动
 #   - 切换 IK 求解器 (fairino / kdl)
-#   - 切换规划算法 (birrt*, rrt*, aapf_birrt*, tube_birrt* 等)
-#   - 返回 HOME、重置场景 (recover)
+#   - 切换规划算法 (mire_biait*, birrt*, rrt, rrt*, aapf_birrt* 等)
+#   - 返回配置起点、重置场景 (recover)
 #   - 末端轨迹实时可视化 (RViz Marker)
 #
 # 依赖：
@@ -17,6 +17,7 @@
 
 import csv
 import hashlib
+import json
 import math
 import os
 import sys
@@ -45,17 +46,45 @@ from visualization_msgs.msg import Marker
 from ament_index_python.packages import get_package_share_directory
 from pymoveit2 import MoveIt2
 from scipy.spatial.transform import Rotation as R
-from pathplanning_scene_tools import SceneEnvironmentManager, SceneLoader
+from pathplanning_scene_tools import SceneEnvironmentManager
 from myrobot_common.planning.motion_executor import PlannerSwitch
 from planning_benchmark import (
-    obstacle_attr, obstacle_center, obstacle_half_extents, select_farthest_goals,
-    write_results, write_summary,
+    GoalSetSpec,
+    ALGORITHM_DIAGNOSTIC_FIELDS,
+    ANYTIME_FIELDS,
+    ROOT_DIAGNOSTIC_FIELDS,
+    TRAJECTORY_PATH_FIELDS,
+    adaptive_challenge_metrics,
+    benchmark_slug,
+    build_goal_sampling_report,
+    canonical_sha256,
+    distance_to_obstacle_surface,
+    sampling_identity_payload,
+    goal_bounds,
+    goal_is_separated,
+    iter_random_candidates,
+    load_goal_collection,
+    obstacle_signature,
+    prepare_benchmark_run,
+    finalize_run_manifest,
+    write_benchmark_summary,
+    initialize_standard_csvs,
+    validate_complete_run,
+    write_goal_collection,
+    write_csv_atomic,
+    write_results,
 )
 from planning_motion import execute_joint_trajectory, joint_trajectory_path_length
 from planning_trace import append_trace_point
 
 import tf2_ros
 from tf2_ros import TransformException
+
+
+BENCHMARK_PLANNER_IDS = {
+    "rrt*", "informed_rrt*", "birrt*", "aapf_birrt*",
+    "mire_biait*", "prm",
+}
 
 
 class MotionPlanningNodeSim(Node):
@@ -78,23 +107,21 @@ class MotionPlanningNodeSim(Node):
         self.declare_parameter("base_frame_name", "base_link")
         self.declare_parameter("ee_frame_name", "tool0")
         self.declare_parameter("joint_names", "j1,j2,j3,j4,j5,j6")
-        self.declare_parameter("home_joints", "-1.1170,-1.6214,1.5465,-1.5877,-1.6368,0.0")
-        self.declare_parameter("home_settle_timeout_s", 6.0)   # HOME 归位确认超时
+        self.declare_parameter("start_joints", "-1.1170,-1.6214,1.5465,-1.5877,-1.6368,0.0")
+        self.declare_parameter("start_id", "home")
+        self.declare_parameter("start_settle_timeout_s", 6.0)
         self.declare_parameter("ik_timeout", 3.0)
 
         # 规划参数
         self.declare_parameter("default_pipeline_id", "fairino")
         self.declare_parameter("default_planner_id", "birrt*")
         self.declare_parameter("target_rpy_deg", "0,-180,0")  # 默认末端姿态（RPY 度）
-        self.declare_parameter("go_home_before_demo", False)
+        self.declare_parameter("go_start_before_demo", False)
+        self.declare_parameter("allowed_planning_time", 30.0)
 
         # 场景与障碍物参数
         self.declare_parameter("auto_add_obstacle", True)
         self.declare_parameter("remove_obstacle_after_demo", True)
-        self.declare_parameter("obstacle_name", "birrt_test_obstacle")
-        self.declare_parameter("obstacle_position", "0.35,0.05,0.28")
-        self.declare_parameter("obstacle_size", "0.18,0.45,0.35")
-        self.declare_parameter("obstacle_boxes", "")
         self.declare_parameter("scene_config_file", "")
         self.declare_parameter("scene_name", "single_obstacle")
         self.declare_parameter("scene_assets_dir", "")
@@ -107,18 +134,21 @@ class MotionPlanningNodeSim(Node):
 
         # benchmark 配置保持 YAML 专属；唯一的运行时归档入口由 launch 注入。
         self.declare_parameter("run_mode", "interactive")
+        self.declare_parameter("goal_collection_dir", "")
         self.declare_parameter("benchmark_output_dir", "")
+        self.declare_parameter("benchmark_goal_root_mode", "single_root")
+        self.declare_parameter("benchmark_effective_config_json", "{}")
         self.declare_parameter("benchmark_repetitions", 20)
-        self.declare_parameter("benchmark_case_label", "")
         self.declare_parameter("benchmark_startup_joint_state_timeout_s", 90.0)
         self.declare_parameter("benchmark_goal_mode", "adaptive_obstacle_challenge_region")
+        self.declare_parameter("ik_mode", "continuous")
         self.declare_parameter("benchmark_goal_seed", 17)
         self.declare_parameter("planner_random_seed", 7)
+        self.declare_parameter("benchmark_variant", "full")
         self.declare_parameter("benchmark_goal_clearance_min_m", 0.06)
         self.declare_parameter("benchmark_goal_clearance_max_m", 0.14)
         self.declare_parameter("benchmark_goal_corridor_clearance_max_m", 0.10)
         self.declare_parameter("benchmark_goal_min_separation_m", 0.04)
-        self.declare_parameter("benchmark_goal_candidate_count", 4096)
         self.declare_parameter("benchmark_goal_state_validity_timeout_s", 2.0)
 
         # 等待参数服务器就绪
@@ -165,10 +195,6 @@ class MotionPlanningNodeSim(Node):
         return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
     @staticmethod
-    def _csv_safe(value) -> str:
-        return str(value).replace("\n", " ").replace(",", ";").strip()
-
-    @staticmethod
     def _resolve_benchmark_output_dir(value) -> str:
         """Expand a user-facing archive path once before any case I/O."""
         path = str(value).strip()
@@ -212,27 +238,33 @@ class MotionPlanningNodeSim(Node):
         self.base_frame_name = str(self.get_parameter("base_frame_name").value)
         self.ee_frame_name = str(self.get_parameter("ee_frame_name").value)
         self.joint_names = self._parse_str_list(self.get_parameter("joint_names").value)
-        self.home_joints = self._parse_float_list(self.get_parameter("home_joints").value)
+        self.start_joints = tuple(
+            self._parse_float_list(self.get_parameter("start_joints").value)
+        )
+        if len(self.start_joints) != len(self.joint_names):
+            raise ValueError("start_joints must contain one value for each joint_names entry")
+        self.start_id = str(self.get_parameter("start_id").value).strip()
+        if not self.start_id or not self.start_id.isascii() or not self.start_id.isalnum():
+            raise ValueError("start_id must contain only ASCII letters and digits")
+        self.start_xyz = None
+        self.start_joint_state = None
 
         self.default_pipeline_id = str(self.get_parameter("default_pipeline_id").value)
-        self.default_planner_id = str(self.get_parameter("default_planner_id").value)
+        self.default_planner_id = PlannerSwitch.normalize_planner(
+            self.default_pipeline_id,
+            str(self.get_parameter("default_planner_id").value),
+        )
         self.default_planning_client = PlannerSwitch.normalize_ik(
             str(self.get_parameter("planning_client").value)
         )
-        self.go_home_before_demo = self._as_bool(self.get_parameter("go_home_before_demo").value)
-        self.home_settle_timeout_s = max(
-            0.5, float(self.get_parameter("home_settle_timeout_s").value)
+        self.allowed_planning_time = max(
+            1e-3, float(self.get_parameter("allowed_planning_time").value)
+        )
+        self.go_start_before_demo = self._as_bool(self.get_parameter("go_start_before_demo").value)
+        self.start_settle_timeout_s = max(
+            0.5, float(self.get_parameter("start_settle_timeout_s").value)
         )
 
-        self.default_obstacle_name = str(self.get_parameter("obstacle_name").value)
-        self.default_obstacle_position = tuple(
-            self._parse_float_list(self.get_parameter("obstacle_position").value)
-        )
-        self.default_obstacle_size = tuple(
-            self._parse_float_list(self.get_parameter("obstacle_size").value)
-        )
-        self.obstacle_boxes = SceneLoader.parse_obstacle_boxes(
-            self.get_parameter("obstacle_boxes").value)
         self.publish_planning_scene = self._as_bool(
             self.get_parameter("publish_planning_scene").value)
         self.publish_obstacle_markers = self._as_bool(
@@ -258,27 +290,69 @@ class MotionPlanningNodeSim(Node):
         )
 
         self.run_mode = str(self.get_parameter("run_mode").value).strip().lower()
-        if self.run_mode not in ("interactive", "benchmark_execution", "benchmark_algorithm"):
+        if self.run_mode not in (
+            "interactive", "goal_collection", "benchmark_execution", "benchmark_algorithm"
+        ):
             raise ValueError(
-                "run_mode must be interactive, benchmark_execution, or benchmark_algorithm"
+                "run_mode must be interactive, goal_collection, benchmark_execution, or benchmark_algorithm"
             )
+        self.goal_collection_dir = self._resolve_benchmark_output_dir(
+            self.get_parameter("goal_collection_dir").value
+        )
         self.benchmark_output_dir = self._resolve_benchmark_output_dir(
             self.get_parameter("benchmark_output_dir").value
         )
-        if self.run_mode != "interactive":
+        self.benchmark_goal_root_mode = str(
+            self.get_parameter("benchmark_goal_root_mode").value
+        ).strip().lower()
+        if self.benchmark_goal_root_mode not in ("single_root", "multi_root"):
+            raise ValueError("benchmark_goal_root_mode must be single_root or multi_root")
+        try:
+            self.benchmark_effective_config = json.loads(str(
+                self.get_parameter("benchmark_effective_config_json").value))
+        except json.JSONDecodeError as exc:
+            raise ValueError("benchmark_effective_config_json must be valid JSON") from exc
+        if not isinstance(self.benchmark_effective_config, dict):
+            raise ValueError("benchmark_effective_config_json must encode an object")
+        self.is_benchmark_mode = self.run_mode in ("benchmark_execution", "benchmark_algorithm")
+        self.effective_allowed_planning_time = self.allowed_planning_time
+        if self.is_benchmark_mode:
+            comparison = self.benchmark_effective_config.get("comparison", {})
+            self.effective_allowed_planning_time = max(
+                1e-3, float(comparison.get("planning_deadline_s", 15.0))
+            )
+        if self.run_mode == "goal_collection" and not self.goal_collection_dir:
+            raise ValueError("goal_collection_dir is required for goal_collection mode")
+        if self.is_benchmark_mode and not self.benchmark_output_dir:
+            raise ValueError("benchmark_output_dir is required for benchmark run_mode")
+        if self.is_benchmark_mode:
+            if (PlannerSwitch.normalize_pipeline(self.default_pipeline_id) != "fairino" or
+                    self.default_planner_id not in BENCHMARK_PLANNER_IDS):
+                raise ValueError(
+                    "benchmark 仅支持 fairino 的 rrt*、informed_rrt*、birrt*、aapf_birrt*、mire_biait*、prm"
+                )
             self.get_logger().info(
                 f"Benchmark archive root: {self.benchmark_output_dir}"
             )
         self.benchmark_repetitions = max(1, int(self.get_parameter("benchmark_repetitions").value))
-        self.benchmark_case_label = str(self.get_parameter("benchmark_case_label").value).strip()
         self.benchmark_startup_joint_state_timeout_s = max(
             1.0, float(self.get_parameter("benchmark_startup_joint_state_timeout_s").value)
         )
         self.benchmark_goal_mode = self._normalize_benchmark_goal_mode(
             self.get_parameter("benchmark_goal_mode").value
         )
+        self.ik_mode = str(self.get_parameter("ik_mode").value).strip().lower()
+        if self.run_mode in ("goal_collection", "benchmark_execution", "benchmark_algorithm") and self.ik_mode != "continuous":
+            raise ValueError("目标集采集与 benchmark 的 ik_mode 仅支持 continuous")
         self.benchmark_goal_seed = int(self.get_parameter("benchmark_goal_seed").value)
         self.planner_random_seed = int(self.get_parameter("planner_random_seed").value)
+        self.benchmark_variant = str(self.get_parameter("benchmark_variant").value).strip().lower() or "full"
+        if self.benchmark_variant not in (
+            "full", "cost_only_queue", "eager_edge_validation", "cost_only_eager"):
+            raise ValueError(
+                "benchmark_variant must be full, cost_only_queue, eager_edge_validation, or cost_only_eager")
+        if self.default_planner_id != "mire_biait*" and self.benchmark_variant != "full":
+            raise ValueError("benchmark_variant is only valid for mire_biait*")
         self.benchmark_goal_clearance_min_m = max(
             0.0, float(self.get_parameter("benchmark_goal_clearance_min_m").value)
         )
@@ -292,28 +366,18 @@ class MotionPlanningNodeSim(Node):
         self.benchmark_goal_min_separation_m = max(
             0.0, float(self.get_parameter("benchmark_goal_min_separation_m").value)
         )
-        self.benchmark_goal_candidate_count = max(
-            self.benchmark_repetitions,
-            int(self.get_parameter("benchmark_goal_candidate_count").value),
-        )
         self.benchmark_goal_state_validity_timeout_s = max(
             0.1, float(self.get_parameter("benchmark_goal_state_validity_timeout_s").value)
         )
         self.benchmark_executes_trajectory = self.run_mode == "benchmark_execution"
 
         # 基本校验
-        if len(self.joint_names) != len(self.home_joints):
-            raise ValueError("joint_names 与 home_joints 长度必须一致")
-        if len(self.default_obstacle_position) != 3:
-            raise ValueError("obstacle_position 必须包含 3 个数值")
-        if len(self.default_obstacle_size) != 3:
-            raise ValueError("obstacle_size 必须包含 3 个数值")
-
         # 运动间默认延迟（秒）
         self.action_delay = 1.0
 
         self.scene_manager = None
         self.active_obstacles = []
+        self._benchmark_goal_sampling_report = None
 
     def setup_scene(self):
         """仅在路径规划模式加载并发布场景。"""
@@ -324,7 +388,6 @@ class MotionPlanningNodeSim(Node):
             base_frame_name=self.base_frame_name,
             scene_name=self.scene_name,
             scene_config_file=self.scene_config_file,
-            scene_assets_dir=self.scene_assets_dir,
             sim_world=self.sim_world,
             obstacle_marker_topic=self.obstacle_marker_topic,
             publish_planning_scene=self.publish_planning_scene,
@@ -333,12 +396,7 @@ class MotionPlanningNodeSim(Node):
             planning_scene_obstacle_padding_m=self.planning_scene_obstacle_padding_m,
         )
         # 加载当前场景的障碍物列表
-        self.active_obstacles = self.scene_manager.load_scene(
-            self.obstacle_boxes,
-            self.default_obstacle_name,
-            self.default_obstacle_position,
-            self.default_obstacle_size,
-        )
+        self.active_obstacles = self.scene_manager.load_scene()
         self.scene_benchmark = getattr(self.scene_manager, "benchmark", {}) or {}
 
     # ═══════════════════════════════════════════════════════
@@ -525,7 +583,7 @@ class MotionPlanningNodeSim(Node):
         arm.planner_id = self.default_planner_id
         arm.max_velocity = 0.5
         arm.max_acceleration = 0.5
-        arm.allowed_planning_time = 15.0
+        arm.allowed_planning_time = self.effective_allowed_planning_time
         arm.goal_position_tolerance = 0.001
         arm.goal_orientation_tolerance = 0.01
         arm.max_step = 0.01
@@ -544,7 +602,6 @@ class MotionPlanningNodeSim(Node):
                 self._configure_moveit2_arm(arm)
             if not self.set_ik(planning_client):
                 raise ValueError("invalid planning_client")
-
             self.get_logger().info("MoveIt接口初始化成功")
             self.get_logger().info(f"  规划管线: {self.moveit2_arm.pipeline_id}")
             self.get_logger().info(f"  规划算法: {self.moveit2_arm.planner_id}")
@@ -563,7 +620,6 @@ class MotionPlanningNodeSim(Node):
 
         except Exception as exc:
             self.get_logger().error(f"MoveIt初始化失败: {exc}")
-            import traceback
             self.get_logger().error(traceback.format_exc())
             raise
 
@@ -619,11 +675,6 @@ class MotionPlanningNodeSim(Node):
 
         return p
 
-    def make_pose_from_xyz(self, xyz: Tuple[float, float, float]) -> Pose:
-        """使用默认 target_rpy_deg 姿态生成 Pose。"""
-        rpy_deg = self._parse_float_list(self.get_parameter("target_rpy_deg").value)
-        return self.make_pose_from_xyzrpy(xyz, rpy_deg)
-
     def _tty_input(self):
         """从 /dev/tty 读取一行，绕过 ros2 launch 的 stdin 重定向。"""
         with open("/dev/tty", "r") as tty:
@@ -634,8 +685,8 @@ class MotionPlanningNodeSim(Node):
         """标准化用户输入命令（去除下划线/连字符，映射到固定命令）。"""
         text = raw.strip().lower().replace("_", " ").replace("-", " ")
         text = " ".join(text.split())
-        if text in ("go home", "gohome", "home"):
-            return "go_home"
+        if text in ("go start", "gostart", "start"):
+            return "go_start"
         if text in ("recover", "reset"):
             return "recover"
         return text
@@ -663,7 +714,7 @@ class MotionPlanningNodeSim(Node):
         从终端读取用户输入，返回动作类型与数据。
         返回:
             ("pose", ((x, y, z), (rx, ry, rz)))
-            ("go_home", None)
+            ("go_start", None)
             ("recover", None)
             ("switch_ik", plugin_str)
             ("switch_planner", (pipeline_str, algorithm_str, raw_algorithm_str))
@@ -675,10 +726,10 @@ class MotionPlanningNodeSim(Node):
                 "支持输入:\n"
                 "  1) x y z rx ry rz            例: 0.30 0.25 0.35 0 -180 0\n"
                 "  2) x y z                      使用 target_rpy_deg 作为固定姿态\n"
-                "  3) go home                    返回 HOME\n"
+                "  3) go start                   返回配置起点\n"
                 "  4) recover                    重置 demo 场景\n"
                 "  5) ik fairino / ik kdl         切换 IK 求解器\n"
-                "  6) planner fairino tube_birrt*  / birrt* / rrt* / aapf_birrt*\n"
+                "  6) planner fairino mire_biait* / aapf_birrt* / birrt* / rrt / rrt* / informed_rrt* / prm\n"
                 "     planner ompl RRTConnectFast\n"
                 f"{'=' * 60}\n> "
             )
@@ -702,9 +753,9 @@ class MotionPlanningNodeSim(Node):
                 algorithm = self._normalize_planner_id(pipeline, raw_algorithm)
                 return ("switch_planner", (pipeline, algorithm, raw_algorithm))
 
-            # 标准化命令（go_home / recover）
+            # 标准化命令（go_start / recover）
             command = self._normalize_command(raw)
-            if command in ("go_home", "recover"):
+            if command in ("go_start", "recover"):
                 return command, None
 
             # 尝试解析数字
@@ -799,7 +850,6 @@ class MotionPlanningNodeSim(Node):
 
         except Exception as exc:
             self.get_logger().error(f"✗ {action_name}失败: {exc}")
-            import traceback
             self.get_logger().error(traceback.format_exc())
             return False
 
@@ -828,11 +878,11 @@ class MotionPlanningNodeSim(Node):
                 if accept_verified_timeout and self._wait_until_joint_state_near(
                     joint_positions,
                     tol=0.03,
-                    timeout=self.home_settle_timeout_s,
-                    label="HOME after execution timeout",
+                    timeout=self.start_settle_timeout_s,
+                    label="start after execution timeout",
                 ):
                     self.get_logger().warn(
-                        "HOME execution action timed out, but the measured joint state reached HOME"
+                        "start execution action timed out, but the measured joint state reached start"
                     )
                     return True
                 self.get_logger().error(
@@ -848,23 +898,39 @@ class MotionPlanningNodeSim(Node):
             self.get_logger().error(f"✗ {action_name}失败: {exc}")
             return False
 
-    def go_home(self):
-        """返回 HOME 构型（允许超时后通过关节状态验证）。"""
+    def _resolve_start_joint_state(self, require_collision_validation):
+        """Return the configured joint-space start state."""
+        joints = [float(value) for value in self.start_joints]
+        if require_collision_validation and not self._is_joint_state_valid_for_benchmark(joints):
+            raise RuntimeError("start_joints_state_invalid")
+        self.start_joint_state = joints
+        return self.start_joint_state
+
+    def go_start(self):
+        """Move to the configured joint-space start state."""
+        joints = self._resolve_start_joint_state(self.scene_manager is not None)
         return self.move_to_joint(
-            self.home_joints,
-            action_name="返回HOME",
+            joints,
+            action_name="返回起点",
             accept_verified_timeout=True,
         )
 
-    def _ensure_home(self):
-        current = self._current_joint_positions_ordered(timeout=0.5)
-        if current is not None and all(
-            error < 0.03 for error in self._joint_position_errors(current, self.home_joints)
-        ):
-            return True, ""
-        return (True, "") if self.go_home() else (
-            False, self._last_execution_error_code_value() or "home_reset_failed"
-        )
+    def _ensure_start(self):
+        joints = self._resolve_start_joint_state(require_collision_validation=True)
+        for attempt in range(3):
+            current = self._current_joint_positions_ordered(timeout=0.5)
+            if current is not None and all(
+                error < 0.03 for error in self._joint_position_errors(current, joints)
+            ):
+                return True, ""
+            if self.go_start():
+                return True, ""
+            if attempt < 2:
+                self.get_logger().warn(
+                    f"start command unavailable; retrying ({attempt + 1}/3)"
+                )
+                time.sleep(1.0)
+        return False, self._last_execution_error_code_value() or "start_reset_failed"
 
     # ═══════════════════════════════════════════════════════
     #  关节状态读取与等待
@@ -954,49 +1020,6 @@ class MotionPlanningNodeSim(Node):
         )
         return False
 
-    def _wait_until_joint_state_stable(
-        self,
-        max_delta=0.005,
-        stable_samples=4,
-        sample_period_s=0.05,
-        timeout=1.5,
-        label="joint_state",
-    ):
-        """等待关节状态连续多次采样变化小于阈值（稳定）。"""
-        t0 = time.time()
-        prev_positions = None
-        stable_count = 0
-        last_delta = None
-        while time.time() - t0 < timeout:
-            ordered_positions = self._ordered_joint_positions(self.moveit2_arm.joint_state)
-            if ordered_positions is None:
-                time.sleep(sample_period_s)
-                continue
-            if prev_positions is not None and len(prev_positions) == len(ordered_positions):
-                deltas = self._joint_position_errors(ordered_positions, prev_positions)
-                last_delta = max(deltas) if deltas else 0.0
-                if last_delta <= max_delta:
-                    stable_count += 1
-                    if stable_count >= stable_samples:
-                        self.get_logger().info(
-                            f"{label} joint stability: elapsed_s={time.time() - t0:.3f} "
-                            f"max_delta_rad={last_delta:.5f} stable_samples={stable_count}"
-                        )
-                        return True
-                else:
-                    stable_count = 0
-            prev_positions = ordered_positions
-            time.sleep(sample_period_s)
-        detail = (
-            f"max_delta_rad={last_delta:.5f}" if last_delta is not None
-            else "joint_state=unavailable_or_incomplete"
-        )
-        self.get_logger().warn(
-            f"Joint state did not stabilize for {label} within {timeout:.1f}s: "
-            f"max_delta_tol_rad={max_delta:.5f} {detail}"
-        )
-        return False
-
     # ═══════════════════════════════════════════════════════
     #  规划器与场景管理
     # ═══════════════════════════════════════════════════════
@@ -1026,7 +1049,7 @@ class MotionPlanningNodeSim(Node):
         if not self._is_valid_planner_id(pipeline, algorithm):
             self.get_logger().error(
                 f"无效 Fairino planner_id: raw='{raw_algorithm}', normalized='{algorithm}'；"
-                "仅支持 aapf_birrt*, tube_birrt*, birrt*, rrt*"
+                "仅支持 mire_biait*, aapf_birrt*, birrt*, rrt, rrt*, informed_rrt*, prm"
             )
             return False
 
@@ -1046,9 +1069,10 @@ class MotionPlanningNodeSim(Node):
         if joint_state is not None and joint_state.position:
             state.joint_state = joint_state
             return state
-        state.joint_state = JointState(
-            name=list(self.joint_names), position=list(self.home_joints)
-        )
+        if self.start_joint_state is not None:
+            state.joint_state = JointState(
+                name=list(self.joint_names), position=list(self.start_joint_state)
+            )
         return state
 
     def _build_ik_request(self, pose):
@@ -1133,8 +1157,8 @@ class MotionPlanningNodeSim(Node):
         target = np.array([pose.position.x, pose.position.y, pose.position.z])
         self.get_logger().info(f"IK 执行后位置误差={np.linalg.norm(actual - target):.6f} m")
 
-    def add_default_obstacle(self):
-        """向规划场景添加默认障碍物。"""
+    def add_scene_obstacles(self):
+        """向规划场景发布 YAML 中选定场景的障碍物。"""
         self.setup_scene()
         self.scene_manager.add_scene(self.active_obstacles)
 
@@ -1147,29 +1171,29 @@ class MotionPlanningNodeSim(Node):
         """
         重置 demo 到初始状态：
         1. 清除障碍物和末端轨迹
-        2. 机械臂回 HOME
-        3. 重置规划器到默认参数
-        4. 重新添加默认障碍物
+        2. 重置规划器到默认参数
+        3. 重新添加 YAML 场景障碍物
+        4. 机械臂回配置起点
         """
-        self.get_logger().warn("执行 recover: 回 HOME → 清除障碍物 → 重置规划器 → 重新加载")
+        self.get_logger().warn("执行 recover: 清除障碍物 → 重置规划器 → 重新加载 → 回起点")
 
         # 1. 清除障碍物和末端轨迹
         self.clear_demo_collision_objects()
         self.clear_ee_trace()
 
-        # 2. 先回 HOME
-        self.go_home()
-
-        # 3. 重置 IK 和规划器
+        # 2. 重置 IK 和规划器
         ik_plugin = str(self.get_parameter("planning_client").value).strip().lower()
         pipeline = str(self.get_parameter("default_pipeline_id").value)
         algorithm = str(self.get_parameter("default_planner_id").value)
         self.set_ik(ik_plugin)
         self.set_planner(pipeline, algorithm)
 
-        # 4. 重新加载障碍物
+        # 3. 重新加载障碍物
         if self._as_bool(self.get_parameter("auto_add_obstacle").value):
-            self.add_default_obstacle()
+            self.add_scene_obstacles()
+
+        # 4. 在已发布场景中校验并返回配置起点
+        self.go_start()
 
         self.get_logger().info("recover 完成")
 
@@ -1177,68 +1201,45 @@ class MotionPlanningNodeSim(Node):
     # 可复现 benchmark（与交互节点共用 MoveIt、场景和规划器）
     # ═══════════════════════════════════════════════════════
 
-    @staticmethod
-    def _obstacle_attr(obstacle, key, default=None):
-        return obstacle_attr(obstacle, key, default)
-
-    def _obstacle_center(self, obstacle):
-        return obstacle_center(obstacle)
-
-    def _obstacle_half_extents(self, obstacle):
-        return obstacle_half_extents(obstacle)
-
     def _obstacle_signature(self):
-        parts = []
-        for obstacle in self.active_obstacles:
-            parts.append({
-                "name": str(self._obstacle_attr(obstacle, "name", "")),
-                "shape": str(self._obstacle_attr(obstacle, "shape", "box")),
-                "position": [round(v, 6) for v in self._obstacle_center(obstacle)],
-                "half_extents": [round(v, 6) for v in self._obstacle_half_extents(obstacle)],
-            })
-        return hashlib.sha256(repr(sorted(parts, key=lambda item: item["name"])).encode()).hexdigest()
+        return obstacle_signature(self.active_obstacles)
 
-    def _distance_to_obstacle_surface(self, point_xyz, obstacles):
-        point = np.asarray(point_xyz, dtype=float)
-        distances = []
-        for obstacle in obstacles:
-            center = np.asarray(self._obstacle_center(obstacle), dtype=float)
-            shape = str(self._obstacle_attr(obstacle, "shape", "box")).lower()
-            if shape == "box":
-                distances.append(float(np.linalg.norm(np.maximum(np.abs(point - center) - self._obstacle_half_extents(obstacle), 0.0))))
-            elif shape == "cylinder":
-                radius, _, half_height = self._obstacle_half_extents(obstacle)
-                radial = max(0.0, float(np.linalg.norm(point[:2] - center[:2])) - radius)
-                vertical = max(0.0, abs(point[2] - center[2]) - half_height)
-                distances.append(float(np.hypot(radial, vertical)))
-            else:
-                distances.append(max(0.0, float(np.linalg.norm(point - center)) - self._obstacle_half_extents(obstacle)[0]))
-        return min(distances) if distances else float("inf")
-
-    def _adaptive_challenge_metrics(self, point_xyz, start_xyz):
-        point = np.asarray(point_xyz, dtype=float)
-        centers = [np.asarray(self._obstacle_center(item), dtype=float) for item in self.active_obstacles]
-        angles = sorted(math.atan2(center[1] - point[1], center[0] - point[0]) for center in centers)
-        if len(angles) >= 2:
-            gaps = [angles[index + 1] - angles[index] for index in range(len(angles) - 1)]
-            gaps.append(2.0 * math.pi - angles[-1] + angles[0])
-            angular_coverage = math.degrees(2.0 * math.pi - max(gaps))
-        else:
-            angular_coverage = 0.0
-        vertical = sum(abs(center[2] - point[2]) > 0.03 for center in centers)
-        clearance = self._distance_to_obstacle_surface(point_xyz, self.active_obstacles)
-        corridor = min(
-            self._distance_to_obstacle_surface(
-                point * (1.0 - alpha) + np.asarray(start_xyz) * alpha, self.active_obstacles
-            ) for alpha in (0.25, 0.5, 0.75)
+    def _goal_set_spec(self, target_rpy_deg):
+        return GoalSetSpec(
+            scene_name=self.scene_name,
+            goal_mode=self.benchmark_goal_mode,
+            goal_seed=self.benchmark_goal_seed,
+            ik_mode=self.ik_mode,
+            obstacle_signature=self._obstacle_signature(),
+            target_rpy_deg=tuple(float(value) for value in target_rpy_deg),
+            repetitions=self.benchmark_repetitions,
+            min_separation_m=self.benchmark_goal_min_separation_m,
+            clearance_min_m=self.benchmark_goal_clearance_min_m,
+            clearance_max_m=self.benchmark_goal_clearance_max_m,
+            corridor_clearance_max_m=self.benchmark_goal_corridor_clearance_max_m,
+            sampling_start_xyz=tuple(float(value) for value in self._start_tcp_xyz()),
+            sampling_start_joints=tuple(float(value) for value in self.start_joints),
+            start_id=self.start_id,
         )
-        accepted = len(centers) >= 3 and vertical >= 2 and angular_coverage >= 180.0 and corridor <= self.benchmark_goal_corridor_clearance_max_m
-        return {
-            "accepted": accepted, "inside_obstacle_hull": angular_coverage >= 180.0,
-            "surrounding_obstacle_count": len(centers), "vertical_obstacle_count": vertical,
-            "angular_coverage_deg": angular_coverage, "corridor_min_clearance_m": corridor,
-            "endpoint_clearance_m": clearance,
-        }
+
+    def _start_tcp_xyz(self):
+        if self.start_xyz is None:
+            if self.start_joint_state is None:
+                raise RuntimeError("start_joint_state is not prepared")
+            poses = self.moveit2_arm.compute_fk(
+                joint_state=self.start_joint_state,
+                fk_link_names=[self.ee_frame_name],
+            )
+            if not poses:
+                raise RuntimeError("start_joints_fk_failed")
+            pose = poses[0] if isinstance(poses, list) else poses
+            position = pose.pose.position
+            self.start_xyz = (float(position.x), float(position.y), float(position.z))
+        return self.start_xyz
+
+    def _benchmark_start_and_rpy(self):
+        target_rpy = tuple(self._parse_float_list(self.get_parameter("target_rpy_deg").value))
+        return self._start_tcp_xyz(), target_rpy
 
     def _joint_state_message(self, values, names=None):
         if hasattr(values, "joint_state"):
@@ -1284,22 +1285,29 @@ class MotionPlanningNodeSim(Node):
     def _joint_trajectory_path_length(trajectory):
         return joint_trajectory_path_length(trajectory)
 
-    def _plan_pose_from_home(self, target_pose):
+    def _plan_pose_from_start(self, target_pose):
+        if self.start_joint_state is None:
+            raise RuntimeError("start_joint_state is not prepared")
         future = self.moveit2_arm.plan_async(
-            pose=self.pose_to_pose_stamped(target_pose), start_joint_state=self.home_joints, cartesian=False
+            pose=self.pose_to_pose_stamped(target_pose), start_joint_state=self.start_joint_state, cartesian=False
         )
         if future is None:
-            return {"success": False, "error_code": "plan_future_unavailable", "core_planning_time_s": 0.0, "trajectory": None}
+            return {"success": False, "failure_code": "plan_request_failed", "core_planning_time_s": 0.0, "trajectory": None}
         while rclpy.ok() and not future.done():
             time.sleep(0.01)
         try:
             response = future.result().motion_plan_response
         except Exception:
-            return {"success": False, "error_code": "plan_exception", "core_planning_time_s": 0.0, "trajectory": None}
+            return {"success": False, "failure_code": "plan_response_failed", "core_planning_time_s": 0.0, "trajectory": None}
         trajectory = response.trajectory.joint_trajectory
         success = response.error_code.val == MoveItErrorCodes.SUCCESS and bool(trajectory.points)
         return {
-            "success": success, "error_code": "" if success else str(response.error_code.val),
+            "success": success,
+            "failure_code": "" if success else (
+                "empty_trajectory" if response.error_code.val == MoveItErrorCodes.SUCCESS
+                else "planning_timeout" if response.error_code.val == MoveItErrorCodes.TIMED_OUT
+                else f"moveit_{response.error_code.val}"
+            ),
             "core_planning_time_s": float(response.planning_time),
             "trajectory": trajectory if success else None,
         }
@@ -1309,7 +1317,7 @@ class MotionPlanningNodeSim(Node):
             return
         display = DisplayTrajectory()
         display.trajectory_start.joint_state.name = list(self.joint_names)
-        display.trajectory_start.joint_state.position = list(self.home_joints)
+        display.trajectory_start.joint_state.position = list(self.start_joint_state or [])
         display.trajectory.append(RobotTrajectory(joint_trajectory=trajectory))
         self.display_trajectory_pub.publish(display)
 
@@ -1318,225 +1326,545 @@ class MotionPlanningNodeSim(Node):
             self.moveit2_arm, trajectory, self._last_execution_error_code_value
         )
 
-    def _benchmark_candidate_status(self, point_xyz, goal_rpy, start_xyz):
-        metrics = self._adaptive_challenge_metrics(point_xyz, start_xyz)
-        if not metrics["accepted"] or not self.benchmark_goal_clearance_min_m <= metrics["endpoint_clearance_m"] <= self.benchmark_goal_clearance_max_m:
-            return False, "geometry"
-        result = self.moveit2_arm.compute_ik(
-            position=point_xyz, quat_xyzw=self._pose_quat_from_rpy(goal_rpy),
-            start_joint_state=self.home_joints, wait_for_server_timeout_sec=0.5,
+    def _benchmark_ik(self, point_xyz, goal_rpy):
+        client = getattr(self, "fairino_ik_client", None)
+        if client is None:
+            result = self.moveit2_arm.compute_ik(
+                position=point_xyz, quat_xyzw=self._pose_quat_from_rpy(goal_rpy),
+                start_joint_state=self.start_joint_state, wait_for_server_timeout_sec=0.5,
+            )
+            return result, "ik_other" if result is None else ""
+        if not client.wait_for_service(timeout_sec=0.5):
+            return None, "ik_other"
+        future = client.call_async(
+            self._build_ik_request(self.make_pose_from_xyzrpy(point_xyz, goal_rpy))
         )
+        while rclpy.ok() and not future.done():
+            time.sleep(0.01)
+        response = future.result()
+        if response is None:
+            return None, "ik_other"
+        if response.error_code.val != MoveItErrorCodes.SUCCESS:
+            reason = (
+                "ik_geometry"
+                if response.error_code.val == MoveItErrorCodes.NO_IK_SOLUTION
+                else "ik_other"
+            )
+            return None, reason
+        return response.solution.joint_state, ""
+
+    def _benchmark_candidate_status(self, point_xyz, goal_rpy, start_xyz):
+        metrics = adaptive_challenge_metrics(
+            point_xyz,
+            start_xyz,
+            self.active_obstacles,
+            self.benchmark_goal_corridor_clearance_max_m,
+        )
+        if (
+            not metrics["accepted"]
+            or not self.benchmark_goal_clearance_min_m
+            <= metrics["endpoint_clearance_m"]
+            <= self.benchmark_goal_clearance_max_m
+        ):
+            return False, "geometry"
+        result, ik_reason = self._benchmark_ik(point_xyz, goal_rpy)
         if result is None or self._joint_state_message(result) is None:
-            return False, "ik"
+            return False, ik_reason or "ik_other"
         return (True, "") if self._is_joint_state_valid_for_benchmark(result) else (False, "state")
 
-    def _goal_is_valid_for_benchmark(self, point_xyz, goal_rpy, start_xyz, existing_goals):
-        ok, _reason = self._benchmark_candidate_status(point_xyz, goal_rpy, start_xyz)
-        return ok and not any(
-            np.linalg.norm(np.asarray(point_xyz) - np.asarray(other[0])) < self.benchmark_goal_min_separation_m
-            for other in existing_goals
-        )
-
-    def _goal_bounds(self):
-        centers = np.asarray([self._obstacle_center(item) for item in self.active_obstacles], dtype=float)
-        extents = np.asarray([self._obstacle_half_extents(item) for item in self.active_obstacles], dtype=float)
-        if not len(centers):
-            raise ValueError("benchmark scene has no obstacles")
-        return np.min(centers - extents, axis=0), np.max(centers + extents, axis=0)
-
-    def _generate_benchmark_goals(self, count, start_xyz, goal_rpy):
-        minimum, maximum = self._goal_bounds()
-        goals, diagnostics = select_farthest_goals(
-            minimum, maximum, count, self.benchmark_goal_candidate_count,
-            self.benchmark_goal_seed, self.benchmark_goal_min_separation_m,
-            lambda point: self._benchmark_candidate_status(point, goal_rpy, start_xyz),
-        )
-        self.get_logger().info(f"benchmark candidate diagnostics: {diagnostics}")
-        return [(point, tuple(goal_rpy)) for point in goals]
-
-    def _write_generated_goals_csv(self, goals, path, start_xyz):
-        fields = ["scene_name", "goal_mode", "goal_seed", "obstacle_signature", "goal_index", "x", "y", "z", "roll_deg", "pitch_deg", "yaw_deg"]
-        with open(path + ".tmp", "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields)
-            writer.writeheader()
-            for index, (xyz, rpy) in enumerate(goals, 1):
-                writer.writerow(dict(zip(fields, [self.scene_name, self.benchmark_goal_mode, self.benchmark_goal_seed, self._obstacle_signature(), index, *xyz, *rpy])))
-        os.replace(path + ".tmp", path)
-
-    def _read_generated_goals_csv(self, path, start_xyz, expected_goal_rpy):
+    def _iter_benchmark_goals(self, count, start_xyz, goal_rpy):
+        minimum, maximum = goal_bounds(self.active_obstacles)
+        rejected = {
+            "geometry": 0, "ik_geometry": 0, "ik_other": 0,
+            "state": 0, "separation": 0,
+        }
         goals = []
-        with open(path, newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
-                if row["scene_name"] != self.scene_name or row["goal_mode"] != self.benchmark_goal_mode or int(row["goal_seed"]) != self.benchmark_goal_seed:
-                    raise ValueError("goal 文件与当前 benchmark 条件不一致")
-                if row["obstacle_signature"] != self._obstacle_signature():
-                    raise ValueError("goal 文件的障碍物布局签名与当前场景不一致")
-                xyz = tuple(float(row[key]) for key in ("x", "y", "z"))
-                rpy = tuple(float(row[key]) for key in ("roll_deg", "pitch_deg", "yaw_deg"))
-                if not np.allclose(rpy, expected_goal_rpy, atol=1e-6) or not self._goal_is_valid_for_benchmark(xyz, rpy, start_xyz, goals):
-                    raise ValueError("goal 文件不再满足当前有效性约束")
-                goals.append((xyz, rpy))
-        if len(goals) != self.benchmark_repetitions:
-            raise ValueError("goal 数量与 benchmark_repetitions 不一致")
-        return goals
+        endpoint_clearances = []
+        candidates = iter_random_candidates(minimum, maximum, self.benchmark_goal_seed)
+        attempts = 0
+        self._benchmark_goal_sampling_report = None
+        while len(goals) < count:
+            attempts += 1
+            point = next(candidates)
+            ok, reason = self._benchmark_candidate_status(point, goal_rpy, start_xyz)
+            if not ok:
+                rejected[reason if reason in rejected else "state"] += 1
+                continue
+            if not goal_is_separated(point, goals, self.benchmark_goal_min_separation_m):
+                rejected["separation"] += 1
+                continue
+            goal = (point, tuple(goal_rpy))
+            goals.append(goal)
+            endpoint_clearances.append(
+                distance_to_obstacle_surface(point, self.active_obstacles)
+            )
+            self._benchmark_goal_sampling_report = build_goal_sampling_report(
+                self.scene_name,
+                self.benchmark_goal_seed,
+                count,
+                attempts,
+                len(goals),
+                rejected,
+                endpoint_clearances,
+            )
+            yield goal
+            if len(goals) == count:
+                self.get_logger().info(
+                    f"benchmark goals accepted={count}/{count} attempts={attempts} rejected={rejected}"
+                )
+                return
 
-    def _benchmark_config(self):
-        scene_hash = hashlib.sha256(open(self.scene_config_file, "rb").read()).hexdigest()
-        return {
-            "case_label": self.benchmark_case_label or self.scene_name, "scene_name": self.scene_name,
-            "scene_yaml_sha256": scene_hash, "goal_mode": self.benchmark_goal_mode,
-            "goal_seed": self.benchmark_goal_seed, "repetitions": self.benchmark_repetitions,
-            "target_rpy_deg": self._parse_float_list(self.get_parameter("target_rpy_deg").value),
-            "goal_clearance_min_m": self.benchmark_goal_clearance_min_m,
-            "goal_clearance_max_m": self.benchmark_goal_clearance_max_m,
-            "goal_corridor_clearance_max_m": self.benchmark_goal_corridor_clearance_max_m,
-            "goal_min_separation_m": self.benchmark_goal_min_separation_m,
+    def _run_manifest(self, paths, collection_manifest):
+        with open(self.scene_config_file, "rb") as handle:
+            scene_hash = hashlib.sha256(handle.read()).hexdigest()
+        private_files = {
+            "rrt": "rrt_params.yaml", "rrt_star": "rrt*_params.yaml",
+            "informed_rrt_star": "rrt*_params.yaml",
+            "birrt_star": "birrt*_params.yaml",
+            "aapf_birrt_star": "aapf_birrt*_params.yaml",
+            "mire_biait_star": "mire_biait*_params.yaml", "prm": "prm_params.yaml",
+        }
+        planner_dir = os.path.join(get_package_share_directory("myrobot_planning_core"), "config")
+        private_params = {}
+        for planner, filename in private_files.items():
+            with open(os.path.join(planner_dir, filename), encoding="utf-8") as handle:
+                params = yaml.safe_load(handle)["fairino"]["algorithms"]
+                config_key = {
+                    "informed_rrt_star": "rrt_star",
+                }.get(planner, planner)
+                private_params[planner] = params[config_key]
+        manifest = {
+            "scene_name": self.scene_name,
+            "scene_yaml_sha256": scene_hash,
+            "goal_set_id": collection_manifest["goal_set_id"],
+            "goal_set_relative_to_benchmark_output_dir": os.path.relpath(
+                paths["directory"], self.benchmark_output_dir
+            ),
+            "goal_set_csv_sha256": collection_manifest["goal_set_csv_sha256"],
+            "goal_set_signature_sha256": collection_manifest["goal_set_signature_sha256"],
+            "goal_collection_format_version": collection_manifest["format_version"],
+            "goal_collection_key": collection_manifest["collection_key"],
+            "goal_set_sampling_identity": sampling_identity_payload(
+                self._goal_set_spec(self._benchmark_start_and_rpy()[1])
+            ),
+            "start_id": self.start_id,
+            "start_joints": list(self.start_joints),
+            "start_tcp_xyz": list(self._start_tcp_xyz()),
+            "start_joint_state": list(self.start_joint_state or []),
+            "goal_root_mode": self.benchmark_goal_root_mode,
+            "planner_id": self.default_planner_id,
+            "planner_random_seed": self.planner_random_seed,
+            "variant": self.benchmark_variant,
+            "status": "prepared",
             "planning_scene_obstacle_padding_m": self.planning_scene_obstacle_padding_m,
+            "scene_benchmark": dict(getattr(self, "scene_benchmark", {}) or {}),
+            "effective_fairness_config": self.benchmark_effective_config,
+            "algorithm_private_parameters": private_params,
         }
 
-    @staticmethod
-    def _write_yaml(path, content):
-        with open(path + ".tmp", "w", encoding="utf-8") as handle:
-            yaml.safe_dump(content, handle, allow_unicode=True, sort_keys=True)
-        os.replace(path + ".tmp", path)
+        signature_payload = dict(manifest)
+        signature_payload.pop("status", None)
+        manifest["run_signature_sha256"] = canonical_sha256(signature_payload)
+        return manifest
 
-    @staticmethod
-    def _benchmark_run_dirs(case_dir):
-        return sorted(
-            entry.path for entry in os.scandir(case_dir)
-            if entry.is_dir() and not entry.name.startswith(".")
+    def _prepare_benchmark_artifacts(self, collection_manifest, paths):
+        self._active_run_manifest = self._run_manifest(paths, collection_manifest)
+        run_dir = prepare_benchmark_run(
+            self.benchmark_output_dir,
+            self.scene_name,
+            collection_manifest["goal_set_id"],
+            self.default_planner_id,
+            self.planner_random_seed,
+            self.benchmark_goal_root_mode,
+            self._active_run_manifest,
+            datetime.now().strftime("%Y%m%d_%H%M%S"),
+            self.benchmark_variant,
+        )
+        finalize_run_manifest(run_dir, "running", self.benchmark_repetitions)
+        return run_dir
+
+    def _planner_stats_temp_path(self, prefix):
+        return os.path.join(
+            self.benchmark_output_dir,
+            f".{prefix}_{benchmark_slug(self.default_planner_id)}"
+            f"_seed{self.planner_random_seed}.csv",
         )
 
-    @classmethod
-    def _migrate_legacy_root_artifacts(cls, case_dir):
-        """Move the former root snapshots into their sole run directory."""
-        legacy_names = ("benchmark_config.yaml", "generated_goals.csv")
-        legacy_paths = [os.path.join(case_dir, name) for name in legacy_names]
-        if not any(os.path.exists(path) for path in legacy_paths):
-            return
-        run_dirs = cls._benchmark_run_dirs(case_dir)
-        if len(run_dirs) != 1:
-            raise RuntimeError(
-                "legacy benchmark root artifacts require exactly one run directory"
+    def _sampling_stats_temp_path(self):
+        return self._planner_stats_temp_path("aapf_sampling_stats")
+
+    def _mire_stats_temp_path(self):
+        return self._planner_stats_temp_path("mire_stats")
+
+    def _planner_diagnostics_temp_path(self):
+        return self._planner_stats_temp_path("planner_diagnostics")
+
+    def _anytime_trace_temp_path(self):
+        return self._planner_stats_temp_path("anytime_trace")
+
+    def _root_diagnostics_temp_path(self):
+        return self._planner_stats_temp_path("root_diagnostics")
+
+    def _trajectory_paths_temp_path(self):
+        return self._planner_stats_temp_path("trajectory_paths")
+
+    def _benchmark_temp_paths(self):
+        return (
+            self._planner_diagnostics_temp_path(), self._sampling_stats_temp_path(),
+            self._mire_stats_temp_path(), self._anytime_trace_temp_path(),
+            self._root_diagnostics_temp_path(), self._trajectory_paths_temp_path(),
+        )
+
+    def _latest_planner_diagnostics(self):
+        path = self._planner_diagnostics_temp_path()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            return rows[-1] if rows else {}
+        except (OSError, csv.Error):
+            return {}
+
+    def _benchmark_result_row(self, index):
+        manifest = self._active_run_manifest
+        return {
+            "scene_name": self.scene_name,
+            "goal_set_id": manifest["goal_set_id"],
+            "goal_set_signature_sha256": manifest["goal_set_signature_sha256"],
+            "goal_index": index,
+            "goal_root_mode": self.benchmark_goal_root_mode,
+            "planner_id": self.default_planner_id,
+            "planner_seed": self.planner_random_seed,
+            "variant": self.benchmark_variant,
+            "run_signature_sha256": manifest["run_signature_sha256"],
+            "plan_success": "false",
+            "failure_stage": "not_run",
+            "failure_code": "not_run",
+            "stop_reason": "not_run",
+            "core_planning_time_s": 0.0,
+            "first_solution_time_s": float("nan"),
+            "first_solution_path_cost_rad": float("nan"),
+            "joint_path_length_rad": float("nan"),
+            "tcp_path_length_m": float("nan"),
+            "joint_turn_total_variation_rad": float("nan"),
+            "waypoint_count": 0,
+            "planner_sample_attempts": 0,
+            "planner_accepted_samples": 0,
+            "planner_iterations": 0,
+            "planner_work_units": 0,
+            "planner_nodes": 0,
+            "planner_edges": 0,
+            "post_solution_sample_attempts": 0,
+            "post_solution_budget_complete": "false",
+            "collision_state_checks": 0,
+            "collision_motion_checks": 0,
+            "valid_motion_edges": 0,
+            "invalid_motion_edges": 0,
+            "ik_time_s": 0.0,
+            "root_generation_time_s": 0.0,
+            "search_time_s": 0.0,
+            "final_validation_time_s": 0.0,
+            "trajectory_construction_time_s": 0.0,
+            "goal_root_count": 0,
+            "selected_goal_root": -1,
+        }
+
+    def _apply_planner_diagnostics(self, row):
+        diagnostics = self._latest_planner_diagnostics()
+        if diagnostics:
+            row.update(
+                stop_reason=diagnostics.get("stop_reason", row["stop_reason"]),
+                planner_sample_attempts=diagnostics.get("sample_attempts", 0),
+                planner_accepted_samples=diagnostics.get("accepted_samples", 0),
+                planner_iterations=diagnostics.get("iterations", 0),
+                planner_nodes=diagnostics.get("num_nodes", 0),
+                planner_work_units=diagnostics.get("work_units", 0),
+                planner_edges=diagnostics.get("graph_edges", 0),
+                post_solution_sample_attempts=diagnostics.get("post_solution_sample_attempts", 0),
+                post_solution_budget_complete=diagnostics.get(
+                    "post_solution_budget_complete", "false"),
+                collision_state_checks=diagnostics.get("collision_state_checks", 0),
+                collision_motion_checks=diagnostics.get("collision_motion_checks", 0),
+                valid_motion_edges=diagnostics.get("valid_motion_edges", 0),
+                invalid_motion_edges=diagnostics.get("invalid_motion_edges", 0),
+                goal_root_count=diagnostics.get("goal_root_count", 0),
+                selected_goal_root=diagnostics.get("selected_goal_root", -1),
+                search_time_s=diagnostics.get("search_time_s", 0.0),
+                ik_time_s=diagnostics.get("ik_time_s", 0.0),
+                root_generation_time_s=diagnostics.get("root_generation_time_s", 0.0),
+                final_validation_time_s=diagnostics.get("final_validation_time_s", 0.0),
+                trajectory_construction_time_s=diagnostics.get("trajectory_construction_time_s", 0.0),
             )
-        run_dir = run_dirs[0]
-        for name, source in zip(legacy_names, legacy_paths):
-            if not os.path.exists(source):
-                continue
-            target = os.path.join(run_dir, name)
-            if os.path.exists(target):
-                with open(source, "rb") as source_handle, open(target, "rb") as target_handle:
-                    if source_handle.read() != target_handle.read():
-                        raise RuntimeError(f"legacy benchmark artifact conflicts with {target}")
-                os.unlink(source)
+            # Path-quality fields are defined only for successful attempts.
+            # Keeping them NaN for failures is required for ITT/censoring analysis.
+            if str(row.get("plan_success", "false")).lower() == "true":
+                row.update(
+                    first_solution_time_s=diagnostics.get("first_solution_time_s", float("nan")),
+                    first_solution_path_cost_rad=diagnostics.get("first_solution_path_cost_rad", float("nan")),
+                    tcp_path_length_m=diagnostics.get("optimized_tcp_path_length_m", float("nan")),
+                    joint_turn_total_variation_rad=diagnostics.get(
+                        "joint_turn_total_variation_rad", float("nan")),
+                    waypoint_count=diagnostics.get("waypoint_count", 0),
+                )
+
+    @staticmethod
+    def _read_temp_rows(path):
+        if not os.path.isfile(path):
+            return []
+        with open(path, newline="", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
+
+    def _common_key(self, goal_index):
+        manifest = self._active_run_manifest
+        return {
+            "scene_name": self.scene_name,
+            "goal_set_id": manifest["goal_set_id"],
+            "goal_set_signature_sha256": manifest["goal_set_signature_sha256"],
+            "goal_index": goal_index,
+            "goal_root_mode": self.benchmark_goal_root_mode,
+            "planner_id": self.default_planner_id,
+            "planner_seed": self.planner_random_seed,
+            "variant": self.benchmark_variant,
+            "run_signature_sha256": manifest["run_signature_sha256"],
+        }
+
+    def _collect_goal_sidecars(self, goal_index, result_row):
+        key = self._common_key(goal_index)
+        trace_source = self._read_temp_rows(self._anytime_trace_temp_path())
+        by_checkpoint = {
+            round(float(row["checkpoint_s"]), 9): row for row in trace_source
+        }
+        checkpoints = self.benchmark_effective_config.get("comparison", {}).get(
+            "anytime_checkpoints_s", (0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0)
+        )
+        last = None
+        for checkpoint in checkpoints:
+            source = by_checkpoint.get(round(float(checkpoint), 9), last)
+            if source is not None:
+                last = source
+            first_solution_time = float(result_row.get("first_solution_time_s", 0.0) or 0.0)
+            has_solution = (
+                result_row.get("plan_success") == "true"
+                and first_solution_time <= float(checkpoint)
+            )
+            source = source or {}
+            source_has_solution = str(source.get("has_solution", "false")).lower() in ("true", "1", "yes")
+            if has_solution and source_has_solution:
+                incumbent = source.get("incumbent_joint_cost_rad", result_row.get("first_solution_path_cost_rad", "inf"))
+            elif has_solution:
+                incumbent = result_row.get("first_solution_path_cost_rad", "inf")
             else:
-                os.replace(source, target)
+                incumbent = "inf"
+            self._anytime_rows.append({
+                **key,
+                "checkpoint_s": checkpoint,
+                "has_solution": str(has_solution).lower(),
+                "incumbent_joint_cost_rad": incumbent,
+                "cumulative_iterations": source.get(
+                    "cumulative_iterations", result_row.get("planner_iterations", 0)),
+                "cumulative_sample_attempts": source.get(
+                    "cumulative_sample_attempts", result_row.get("planner_sample_attempts", 0)),
+                "cumulative_accepted_samples": source.get(
+                    "cumulative_accepted_samples", result_row.get("planner_accepted_samples", 0)),
+                "cumulative_nodes": source.get(
+                    "cumulative_nodes", result_row.get("planner_nodes", 0)),
+                "cumulative_work_units": source.get(
+                    "cumulative_work_units", result_row.get("planner_work_units", 0)),
+            })
 
-    def _prepare_benchmark_artifacts(self):
-        if not self.benchmark_output_dir:
-            raise RuntimeError("benchmark_output_dir is required")
-        case_dir = os.path.abspath(self.benchmark_output_dir)
-        os.makedirs(case_dir, exist_ok=True)
-        self._migrate_legacy_root_artifacts(case_dir)
-        config = self._benchmark_config()
-        for run_dir in self._benchmark_run_dirs(case_dir):
-            config_path = os.path.join(run_dir, "benchmark_config.yaml")
-            if not os.path.exists(config_path):
-                continue
-            with open(config_path, encoding="utf-8") as handle:
-                stored = yaml.safe_load(handle) or {}
-            existing = dict(stored)
-            existing.pop("execute_planned_trajectory", None)
-            existing.pop("go_home_before_benchmark", None)
-            if existing != config:
-                raise RuntimeError("benchmark case lock differs; use a new benchmark_output_dir")
-            if stored != config:
-                self._write_yaml(config_path, config)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stem = f"{self._benchmark_slug(self.default_planner_id)}_seed{self.planner_random_seed}_{stamp}"
-        run_dir = os.path.join(case_dir, stem)
-        suffix = 1
-        while os.path.exists(run_dir):
-            run_dir = os.path.join(case_dir, f"{stem}_{suffix}")
-            suffix += 1
-        os.makedirs(run_dir)
-        self._write_yaml(os.path.join(run_dir, "benchmark_config.yaml"), config)
-        return case_dir, run_dir, config
+        roots = self._read_temp_rows(self._root_diagnostics_temp_path())
+        accepted_root_count = int(float(result_row.get("goal_root_count", 0) or 0))
+        if accepted_root_count <= 0:
+            accepted_root_count = sum(
+                str(root.get("passed_hard_filter", "true")).lower() in ("true", "1", "yes")
+                for root in roots
+            )
+        if not roots:
+            roots = [{
+                "root_index": -1, "passed_hard_filter": "false",
+                "filter_reason": result_row.get("failure_code", "no_valid_root"),
+                "total_cost": "", "selected_final": "false",
+                **{f"q{joint}": "" for joint in range(1, 7)},
+            }]
+        for root in roots:
+            self._root_rows.append({
+                **key,
+                "root_index": root.get("root_index", -1),
+                **{f"q{joint}": root.get(f"q{joint}", "") for joint in range(1, 7)},
+                "passed_hard_filter": root.get("passed_hard_filter", "true"),
+                "filter_reason": root.get("filter_reason", ""),
+                "total_cost": root.get("total_cost", ""),
+                "assigned_sample_attempts": root.get("assigned_sample_attempts", 0),
+                "accepted_samples": root.get("accepted_samples", 0),
+                "path_improvements": root.get("path_improvements", 0),
+                "selected_final": root.get("selected_final", "false"),
+            })
+        result_row["goal_root_count"] = accepted_root_count
+        selected = [row for row in roots if row.get("selected_final") == "true"]
+        result_row["selected_goal_root"] = selected[0].get("root_index", -1) if selected else -1
 
-    @classmethod
-    def _find_existing_goals(cls, case_dir, run_dir):
-        for candidate_dir in cls._benchmark_run_dirs(case_dir):
-            if os.path.abspath(candidate_dir) == os.path.abspath(run_dir):
-                continue
-            path = os.path.join(candidate_dir, "generated_goals.csv")
-            if os.path.exists(path):
-                return path
-        return None
+        diagnostic_sources = [self._latest_planner_diagnostics()]
+        diagnostic_sources += self._read_temp_rows(self._sampling_stats_temp_path())
+        diagnostic_sources += self._read_temp_rows(self._mire_stats_temp_path())
+        for diagnostic in diagnostic_sources:
+            for name, value in diagnostic.items():
+                if name in ("run_index", "planner_seed", "planner_id"):
+                    continue
+                if value is None or not str(value).strip():
+                    continue
+                try:
+                    numeric = float(value)
+                    if not math.isfinite(numeric):
+                        continue
+                    text = ""
+                except (TypeError, ValueError):
+                    numeric, text = float("nan"), str(value)
+                self._algorithm_rows.append({
+                    **key, "metric_name": name, "metric_value": numeric,
+                    "metric_text": text, "ablation_variant": self.benchmark_variant,
+                })
+        if self.default_planner_id == "aapf_birrt*":
+            for name in ("sample_tube", "sample_detour"):
+                self._algorithm_rows.append({
+                    **key, "metric_name": name, "metric_value": 0.0,
+                    "metric_text": "pure_aapf", "ablation_variant": self.benchmark_variant,
+                })
+        if not diagnostic_sources[0]:
+            self._algorithm_rows.append({
+                **key, "metric_name": "diagnostics_available", "metric_value": 0.0,
+                "metric_text": "false", "ablation_variant": self.benchmark_variant,
+            })
 
-    @staticmethod
-    def _benchmark_slug(value):
-        return "".join(char if char.isalnum() or char in "_.-" else "_" for char in str(value))
+        if result_row.get("plan_success") == "true":
+            for waypoint in self._read_temp_rows(self._trajectory_paths_temp_path()):
+                self._trajectory_rows.append({
+                    **key,
+                    "path_stage": waypoint.get("path_stage", "final"),
+                    "waypoint_index": waypoint.get("waypoint_index", 0),
+                    **{f"q{joint}": waypoint.get(f"q{joint}", "") for joint in range(1, 7)},
+                    "tcp_x": waypoint.get("tcp_x", ""),
+                    "tcp_y": waypoint.get("tcp_y", ""),
+                    "tcp_z": waypoint.get("tcp_z", ""),
+                    "selected_goal_root": result_row.get("selected_goal_root", -1),
+                })
 
-    @staticmethod
-    def _write_results(path, rows):
-        write_results(path, rows)
+    def _write_benchmark_csvs(self, run_dir, result_rows):
+        write_results(os.path.join(run_dir, "results.csv"), result_rows)
+        write_csv_atomic(os.path.join(run_dir, "anytime_trace.csv"), self._anytime_rows, ANYTIME_FIELDS)
+        write_csv_atomic(os.path.join(run_dir, "root_diagnostics.csv"), self._root_rows, ROOT_DIAGNOSTIC_FIELDS)
+        write_csv_atomic(
+            os.path.join(run_dir, "algorithm_diagnostics.csv"),
+            self._algorithm_rows, ALGORITHM_DIAGNOSTIC_FIELDS)
+        write_csv_atomic(os.path.join(run_dir, "trajectory_paths.csv"), self._trajectory_rows, TRAJECTORY_PATH_FIELDS)
 
-    @staticmethod
-    def _write_benchmark_summary(path, rows, expected, run_mode, status="completed", reason=""):
-        write_summary(path, rows, expected, run_mode, status, reason)
+    def _run_benchmark_goal(self, index, xyz, rpy):
+        row = self._benchmark_result_row(index)
+        for path in self._benchmark_temp_paths():
+            if os.path.isfile(path):
+                os.unlink(path)
+        ready_for_goal = (
+            not self.benchmark_executes_trajectory
+            or index == 1
+            or self._ensure_start()[0]
+        )
+        if not ready_for_goal:
+            row["failure_stage"] = "start_reset"
+            row["failure_code"] = "start_reset_failed"
+            row["stop_reason"] = "precondition_failed"
+            self._collect_goal_sidecars(index, row)
+            return row
+
+        result = self._plan_pose_from_start(self.make_pose_from_xyzrpy(xyz, rpy))
+        row.update(
+            plan_success=str(result["success"]).lower(),
+            failure_stage="" if result["success"] else "planning",
+            failure_code=result["failure_code"],
+            stop_reason=("deadline_no_solution" if result["failure_code"] == "planning_timeout" else "completed"),
+            core_planning_time_s=f"{result['core_planning_time_s']:.6f}",
+        )
+        self._apply_planner_diagnostics(row)
+        trajectory = result["trajectory"]
+        if trajectory is not None:
+            row["joint_path_length_rad"] = (
+                f"{self._joint_trajectory_path_length(trajectory):.6f}"
+            )
+            row["waypoint_count"] = len(trajectory.points)
+            self._publish_display_trajectory(trajectory)
+            if self.benchmark_executes_trajectory:
+                ok, _code = self._execute_joint_trajectory(trajectory)
+                if ok:
+                    self.go_start()
+        self._collect_goal_sidecars(index, row)
+        return row
+
+    def run_goal_collection(self):
+        self.setup_scene()
+        if not self._wait_for_complete_joint_state(self.benchmark_startup_joint_state_timeout_s, "goal collection start"):
+            raise RuntimeError("runtime_not_ready: missing complete joint state")
+        if self._as_bool(self.get_parameter("auto_add_obstacle").value):
+            self.add_scene_obstacles()
+        self._resolve_start_joint_state(require_collision_validation=True)
+        start_xyz, target_rpy = self._benchmark_start_and_rpy()
+        spec = self._goal_set_spec(target_rpy)
+        try:
+            paths, goals, _manifest = load_goal_collection(self.goal_collection_dir, spec)
+            self.get_logger().info(f"Reused goal collection: {paths['directory']} ({len(goals)} goals)")
+            return
+        except FileNotFoundError:
+            pass
+        goals = list(self._iter_benchmark_goals(self.benchmark_repetitions, start_xyz, target_rpy))
+        if len(goals) != self.benchmark_repetitions or self._benchmark_goal_sampling_report is None:
+            raise RuntimeError("goal collection ended before all valid goals were accepted")
+        with open(self.scene_config_file, "rb") as handle:
+            scene_sha = hashlib.sha256(handle.read()).hexdigest()
+        paths, _goals, _manifest, reused = write_goal_collection(
+            self.goal_collection_dir, spec, goals, scene_sha, self._benchmark_goal_sampling_report
+        )
+        self.get_logger().info(
+            f"{'Reused' if reused else 'Collected'} goal collection: {paths['directory']}"
+        )
 
     def run_benchmark(self):
-        case_dir = os.path.abspath(self.benchmark_output_dir) if self.benchmark_output_dir else None
         run_dir = None
         rows = []
+        self._anytime_rows = []
+        self._root_rows = []
+        self._algorithm_rows = []
+        self._trajectory_rows = []
         try:
-            case_dir, run_dir, _config = self._prepare_benchmark_artifacts()
             self.setup_scene()
             if not self._wait_for_complete_joint_state(self.benchmark_startup_joint_state_timeout_s, "benchmark start"):
                 raise RuntimeError("runtime_not_ready: missing complete joint state")
-            if self._as_bool(self.get_parameter("auto_add_obstacle").value): self.add_default_obstacle()
-            pre_home_ok, pre_home_error = self._ensure_home()
-            if not pre_home_ok:
-                raise RuntimeError(f"home_reset_failed: {pre_home_error}")
-            start = self.scene_benchmark.get("start_pose")
-            if start is None: raise RuntimeError(f"scene {self.scene_name} lacks benchmark.start_pose")
-            start_xyz, _ = self._parse_pose_values(self._parse_float_list(start), self._parse_float_list(self.get_parameter("target_rpy_deg").value))
-            target_rpy = tuple(self._parse_float_list(self.get_parameter("target_rpy_deg").value))
-            goals_path = os.path.join(run_dir, "generated_goals.csv")
-            source_goals_path = self._find_existing_goals(case_dir, run_dir)
-            if source_goals_path:
-                goals = self._read_generated_goals_csv(source_goals_path, start_xyz, target_rpy)
-                self._write_generated_goals_csv(goals, goals_path, start_xyz)
-            else:
-                goals = self._generate_benchmark_goals(
-                    self.benchmark_repetitions, start_xyz, target_rpy
-                )
-                self._write_generated_goals_csv(goals, goals_path, start_xyz)
+            if self._as_bool(self.get_parameter("auto_add_obstacle").value): self.add_scene_obstacles()
+            pre_start_ok, pre_start_error = self._ensure_start()
+            if not pre_start_ok:
+                raise RuntimeError(f"start_reset_failed: {pre_start_error}")
+            for stale_stats in self._benchmark_temp_paths():
+                if os.path.exists(stale_stats):
+                    os.unlink(stale_stats)
+            start_xyz, target_rpy = self._benchmark_start_and_rpy()
+            goal_spec = self._goal_set_spec(target_rpy)
+            paths, goals, collection_manifest = load_goal_collection(self.goal_collection_dir, goal_spec)
+            run_dir = self._prepare_benchmark_artifacts(collection_manifest, paths)
             for index, (xyz, rpy) in enumerate(goals, 1):
-                row = {"run_index": index, "run_mode": self.run_mode, "planner_id": self.default_planner_id, "planner_random_seed": self.planner_random_seed, "plan_success": "false", "success": "false", "failure_phase": "none", "error_code": "", "goal_pose": "/".join(f"{value:.4f}" for value in (*xyz, *rpy)), "core_planning_time_s": 0.0, "optimized_joint_path_length_rad": 0.0, "execution_success": "not_run", "return_home_success": "not_run"}
-                if self.benchmark_executes_trajectory and index > 1 and not self._ensure_home()[0]: row.update(failure_phase="home_reset", error_code="home_reset_failed")
-                else:
-                    result = self._plan_pose_from_home(self.make_pose_from_xyzrpy(xyz, rpy)); row.update(plan_success=str(result["success"]).lower(), error_code=result["error_code"], core_planning_time_s=f"{result['core_planning_time_s']:.6f}")
-                    trajectory = result["trajectory"]
-                    if trajectory is None: row["failure_phase"] = "goal_plan"
-                    else:
-                        row.update(optimized_joint_path_length_rad=f"{self._joint_trajectory_path_length(trajectory):.6f}")
-                        self._publish_display_trajectory(trajectory)
-                        if self.benchmark_executes_trajectory:
-                            ok, code = self._execute_joint_trajectory(trajectory); row.update(execution_success=str(ok).lower(), failure_phase="none" if ok else "goal_execute", error_code="" if ok else code)
-                            if ok and not self.go_home(): row.update(success="false", return_home_success="false", failure_phase="return_home", error_code="return_home_failed")
-                            elif ok: row.update(success="true", return_home_success="true")
-                        else: row.update(success="true")
-                rows.append(row); self._write_results(os.path.join(run_dir, "results.csv"), rows)
-            self._write_benchmark_summary(os.path.join(run_dir, "summary.md"), rows, self.benchmark_repetitions, self.run_mode)
+                rows.append(self._run_benchmark_goal(index, xyz, rpy))
+                self._write_benchmark_csvs(run_dir, rows)
+            self._write_benchmark_csvs(run_dir, rows)
+            finalize_run_manifest(run_dir, "complete", self.benchmark_repetitions)
+            valid, reason = validate_complete_run(
+                run_dir, self.benchmark_repetitions,
+                tuple(self.benchmark_effective_config.get("comparison", {}).get(
+                    "anytime_checkpoints_s", (0.1, 0.2, 0.5, 1, 2, 5, 10, 15))))
+            if not valid:
+                raise RuntimeError(f"run_integrity_failed: {reason}")
+            write_benchmark_summary(run_dir)
         except Exception as exc:
             if run_dir:
-                self._write_results(os.path.join(run_dir, "results.csv"), rows)
-                self._write_benchmark_summary(os.path.join(run_dir, "summary.md"), rows, self.benchmark_repetitions, self.run_mode, "aborted", str(exc))
-            elif case_dir:
-                os.makedirs(case_dir, exist_ok=True)
-                with open(os.path.join(case_dir, "benchmark_aborted.md"), "w", encoding="utf-8") as handle:
-                    handle.write(f"# Planning benchmark aborted\n\nreason: {exc}\n")
+                self._write_benchmark_csvs(run_dir, rows)
+                finalize_run_manifest(
+                    run_dir, "aborted", self.benchmark_repetitions, str(exc))
+                write_benchmark_summary(run_dir)
             raise RuntimeError(str(exc))
 
     # ═══════════════════════════════════════════════════════
@@ -1578,27 +1906,27 @@ class MotionPlanningNodeSim(Node):
             f"scene={self.scene_name}"
         )
 
-        # 可选：demo 前先回 HOME
-        if self.go_home_before_demo:
-            if not self.go_home():
-                self.get_logger().error("回 HOME 失败，终止 demo")
-                return
-        else:
-            self.get_logger().info("go_home_before_demo=false，启动后保持当前机械臂初始状态")
-
         self.setup_scene()
         # 按需添加障碍物
         if self._as_bool(self.get_parameter("auto_add_obstacle").value):
-            self.add_default_obstacle()
+            self.add_scene_obstacles()
+
+        # 可选：demo 前在已发布场景中先回配置起点
+        if self.go_start_before_demo:
+            if not self.go_start():
+                self.get_logger().error("回起点失败，终止 demo")
+                return
+        else:
+            self.get_logger().info("go_start_before_demo=false，启动后保持当前机械臂初始状态")
 
         while rclpy.ok():
             # 读取用户输入（目标位姿或命令）
             action, data = self.read_pose_or_command(
-                "输入终点 pose: x y z [rx ry rz]，或输入 ik/planner/go home/recover"
+                "输入终点 pose: x y z [rx ry rz]，或输入 ik/planner/go start/recover"
             )
 
-            if action == "go_home":
-                self.go_home()
+            if action == "go_start":
+                self.go_start()
                 if not self.ask_continue():
                     break
                 continue
@@ -1653,19 +1981,19 @@ class MotionPlanningNodeSim(Node):
     def run_ik_comparison_mode(self):
         """比较原始 IK 服务结果后直接按选中解执行，不加载规划场景。"""
         self.get_logger().info("Fairino/KDL IK 对比测试")
-        self.go_home()
+        self.go_start()
         while rclpy.ok():
             action, data = self.read_pose_or_command(
-                "输入 IK 目标 pose: x y z [rx ry rz]，或输入 ik/planner/go home"
+                "输入 IK 目标 pose: x y z [rx ry rz]，或输入 ik/planner/go start"
             )
-            if action == "go_home":
-                self.go_home()
+            if action == "go_start":
+                self.go_start()
             elif action == "switch_ik":
                 self.set_ik(data)
             elif action == "switch_planner":
                 self.set_planner(*data)
             elif action == "recover":
-                self.get_logger().warn("IK 对比模式不管理场景；请使用 home。")
+                self.get_logger().warn("IK 对比模式不管理场景；请使用 go start。")
             else:
                 xyz, rpy = data
                 pose = self.make_pose_from_xyzrpy(xyz, rpy)
@@ -1677,6 +2005,9 @@ class MotionPlanningNodeSim(Node):
 
     def run_demo(self):
         """从终端菜单选择路径规划或 IK 对比。"""
+        if self.run_mode == "goal_collection":
+            self.run_goal_collection()
+            return
         if self.run_mode != "interactive":
             self.run_benchmark()
             return

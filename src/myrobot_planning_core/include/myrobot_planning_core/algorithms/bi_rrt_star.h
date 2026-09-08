@@ -53,9 +53,10 @@ private:
 
     PlanResult planImpl(
         const JointConfig& q_start,
-        const JointConfig& q_goal,
+        const std::vector<JointConfig>& goal_candidates,
         const std::vector<ObstacleInfo>& obstacles,
-        unsigned int request_seed);
+        unsigned int request_seed,
+        const PlanRequestCore* request = nullptr);
 };
 
 }  // namespace fairino_planning

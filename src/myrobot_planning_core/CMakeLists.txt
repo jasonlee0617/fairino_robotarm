@@ -17,22 +17,23 @@ find_package(Eigen3 REQUIRED)
 # ─── 收集实际存在的源文件 ───
 # 先列出所有预期源文件, 再过滤掉不存在的
 set(ALL_EXPECTED_SOURCES
-  src/aapf/aapf_potential_field.cpp
-  src/aapf/sobol_sequence_3d.cpp
   src/dh_kinematics.cpp
   src/ik/fairino_ik.cpp
   src/ik/ik_selector.cpp
   src/ik/cartesian_path_planner.cpp
   src/tree/rrt_tree.cpp
-  src/samplers/mixed_sampler.cpp
-  src/samplers/aapf_guided_sampler.cpp
+  src/aapf/aapf_guided_sampler.cpp
   src/constraints/orientation_checker.cpp
   src/trajectory/path_shortcut.cpp
   src/trajectory/trajectory_smoother.cpp
-  src/algorithms/aapf_bi_rrt_star.cpp
-  src/algorithms/tube_bi_rrt_star.cpp
-  src/algorithms/rrt_star.cpp
-  src/algorithms/bi_rrt_star.cpp
+  src/algorithms/bidirectional/aapf_bi_rrt_star.cpp
+  src/algorithms/bidirectional/bi_rrt_star.cpp
+  src/algorithms/graph/mire_bi_ait_star.cpp
+  src/algorithms/graph/prm.cpp
+  src/algorithms/rrt/rrt.cpp
+  src/algorithms/rrt/rrt_star.cpp
+  src/algorithms/rrt/rrt_star_search.cpp
+  src/algorithms/rrt/informed_rrt_star.cpp
 )
 
 set(CORE_SOURCES "")
@@ -92,10 +93,20 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_aapf_bi_rrt_star test/test_aapf_bi_rrt_star.cpp)
   target_link_libraries(test_aapf_bi_rrt_star ${PROJECT_NAME})
+  ament_add_gtest(test_aapf_guided_sampler test/test_aapf_guided_sampler.cpp)
+  target_link_libraries(test_aapf_guided_sampler ${PROJECT_NAME})
   ament_add_gtest(test_bi_rrt_star test/test_bi_rrt_star.cpp)
   target_link_libraries(test_bi_rrt_star ${PROJECT_NAME})
+  ament_add_gtest(test_mire_bi_ait_star test/test_mire_bi_ait_star.cpp)
+  target_link_libraries(test_mire_bi_ait_star ${PROJECT_NAME})
   ament_add_gtest(test_rrt_tree test/test_rrt_tree.cpp)
   target_link_libraries(test_rrt_tree ${PROJECT_NAME})
+  ament_add_gtest(test_rrt test/test_rrt.cpp)
+  target_link_libraries(test_rrt ${PROJECT_NAME})
+  ament_add_gtest(test_informed_rrt_star test/test_informed_rrt_star.cpp)
+  target_link_libraries(test_informed_rrt_star ${PROJECT_NAME})
+  ament_add_gtest(test_prm test/test_prm.cpp)
+  target_link_libraries(test_prm ${PROJECT_NAME})
   ament_add_gtest(test_ik_selector_profiles test/test_ik_selector_profiles.cpp)
   target_link_libraries(test_ik_selector_profiles ${PROJECT_NAME})
   ament_add_gtest(test_dh_tcp_transform test/test_dh_tcp_transform.cpp)

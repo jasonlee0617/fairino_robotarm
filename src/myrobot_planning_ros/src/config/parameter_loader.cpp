@@ -3,6 +3,7 @@
 #include "myrobot_planning_ros/pipeline/fairino_planning_pipeline.h"
 #include <algorithm>
 #include <cctype>
+#include <stdexcept>
 #include <vector>
 
 namespace fairino_planning::config {
@@ -148,6 +149,11 @@ IKSelectParams loadIKSelectParams(const rclcpp::Node::SharedPtr& node, const std
         node, ns, "fairino.ik.continuity.cartesian_stream_max_pos_step_m", p.cartesian_stream_max_pos_step_m);
     p.cartesian_stream_max_rot_step_rad = gd(
         node, ns, "fairino.ik.continuity.cartesian_stream_max_rot_step_rad", p.cartesian_stream_max_rot_step_rad);
+    p.continuous_max_goal_roots = gi(
+        node, ns, "fairino.ik.continuous.max_goal_roots", p.continuous_max_goal_roots);
+    p.continuous_goal_root_min_separation_rad = gd(
+        node, ns, "fairino.ik.continuous.goal_root_min_separation_rad",
+        p.continuous_goal_root_min_separation_rad);
 
     // 3. posture
     p.upper_arm_min_z_soft   = gd(node, ns, "fairino.ik.posture.upper_arm_min_z_soft", p.upper_arm_min_z_soft);
@@ -248,6 +254,9 @@ PlannerConfig loadPlannerConfig(
 
     auto& p = cfg.planning;
     p.max_iterations = gi_pref(node, ns, prefix, legacy, "max_iterations", p.max_iterations);
+    p.post_solution_sample_attempts = gi_pref(
+        node, ns, prefix, legacy, "post_solution_sample_attempts",
+        p.post_solution_sample_attempts);
     p.max_step = gd_pref(node, ns, prefix, legacy, "max_step", p.max_step);
     p.goal_threshold = gd_pref(node, ns, prefix, legacy, "goal_threshold", p.goal_threshold);
     p.goal_bias = gd_pref(node, ns, prefix, legacy, "goal_bias", p.goal_bias);
@@ -255,162 +264,50 @@ PlannerConfig loadPlannerConfig(
     p.gamma = gd_pref(node, ns, prefix, legacy, "gamma", p.gamma);
     p.max_rewire_radius = gd_pref(node, ns, prefix, legacy, "max_rewire_radius", p.max_rewire_radius);
     p.max_near = gi_pref(node, ns, prefix, legacy, "max_near", p.max_near);
-    p.continue_after_goal = gb_pref(node, ns, prefix, legacy, "continue_after_goal", p.continue_after_goal);
-    p.rewire_after_goal_iters = gi_pref(node, ns, prefix, legacy, "rewire_after_goal_iters", p.rewire_after_goal_iters);
-    p.tube_every_k = gi_pref(node, ns, prefix, legacy, "tube_every_k", p.tube_every_k);
-    p.tube_cooldown_len = gi_pref(node, ns, prefix, legacy, "tube_cooldown_len", p.tube_cooldown_len);
-    p.tube_fail_streak_to_cool = gi_pref(node, ns, prefix, legacy, "tube_fail_streak_to_cool", p.tube_fail_streak_to_cool);
-    p.prob_uniform = gd_pref(node, ns, prefix, legacy, "prob_uniform", p.prob_uniform);
     p.connect_max_steps = gi_pref(node, ns, prefix, legacy, "connect_max_steps", p.connect_max_steps);
     p.connect_goal_bias = gd_pref(node, ns, prefix, legacy, "connect_goal_bias", p.connect_goal_bias);
     p.rewire_every_k = gi_pref(node, ns, prefix, legacy, "rewire_every_k", p.rewire_every_k);
     p.rewire_max_neighbors = gi_pref(node, ns, prefix, legacy, "rewire_max_neighbors", p.rewire_max_neighbors);
-    p.tube_radius = gd_pref(node, ns, prefix, legacy, "tube_radius", p.tube_radius);
     p.validation_distance = gd_pref(node, ns, prefix, legacy, "validation_distance", p.validation_distance);
+    p.mire_biait.batch_size = gi_pref(
+        node, ns, prefix, legacy, "batch_size", p.mire_biait.batch_size);
+    p.mire_biait.post_solution_batch_size = gi_pref(
+        node, ns, prefix, legacy, "post_solution_batch_size",
+        p.mire_biait.post_solution_batch_size);
+    p.mire_biait.rgg_factor = gd_pref(
+        node, ns, prefix, legacy, "rgg_factor", p.mire_biait.rgg_factor);
+    p.mire_biait.effort_focal_factor = gd_pref(
+        node, ns, prefix, legacy, "effort_focal_factor", p.mire_biait.effort_focal_factor);
+    p.mire_biait.ablation_variant = gs(
+        node, ns, prefixed(prefix, "ablation_variant"), p.mire_biait.ablation_variant);
+    p.mire_biait.enable_effort_focal_queue = gb_pref(
+        node, ns, prefix, legacy, "enable_effort_focal_queue", p.mire_biait.enable_effort_focal_queue);
+    p.mire_biait.enable_lazy_edge_validation = gb_pref(
+        node, ns, prefix, legacy, "enable_lazy_edge_validation", p.mire_biait.enable_lazy_edge_validation);
+    p.prm.k_neighbors = gi_pref(node, ns, prefix, legacy, "k_neighbors", p.prm.k_neighbors);
 
-    p.detour_min_height = gd_pref(node, ns, prefix, legacy, "sampling.detour_min_height", p.detour_min_height);
-    p.detour_vertical_clearance = gd_pref(node, ns, prefix, legacy, "sampling.detour_vertical_clearance", p.detour_vertical_clearance);
-    p.detour_min_side_dist = gd_pref(node, ns, prefix, legacy, "sampling.detour_min_side_dist", p.detour_min_side_dist);
-    p.detour_side_scale = gd_pref(node, ns, prefix, legacy, "sampling.detour_side_scale", p.detour_side_scale);
-    p.detour_side_z_offset = gd_pref(node, ns, prefix, legacy, "sampling.detour_side_z_offset", p.detour_side_z_offset);
-    p.detour_projection_eps = gd_pref(node, ns, prefix, legacy, "sampling.detour_projection_eps", p.detour_projection_eps);
-    p.detour_side_fallback_dist = gd_pref(node, ns, prefix, legacy, "sampling.detour_side_fallback_dist", p.detour_side_fallback_dist);
-    p.tube_orientation_blend_distance_m = gd_pref(
-        node, ns, prefix, legacy,
-        "sampling.tube_orientation_blend_distance_m",
-        p.tube_orientation_blend_distance_m);
-    p.tube_detour_over_threshold = gd_pref(node, ns, prefix, legacy, "sampling.tube_detour_over_threshold", p.tube_detour_over_threshold);
-    p.tube_detour_side_threshold = gd_pref(node, ns, prefix, legacy, "sampling.tube_detour_side_threshold", p.tube_detour_side_threshold);
-    p.tube_segment_switch_prob = gd_pref(node, ns, prefix, legacy, "sampling.tube_segment_switch_prob", p.tube_segment_switch_prob);
-    p.ik_seed_perturb_sigma = gd_pref(node, ns, prefix, legacy, "sampling.ik_seed_perturb_sigma", p.ik_seed_perturb_sigma);
-    p.uniform_retry_count = gi_pref(node, ns, prefix, legacy, "sampling.uniform_retry_count", p.uniform_retry_count);
-    p.local_retry_levels = gi_pref(node, ns, prefix, legacy, "sampling.local_retry_levels", p.local_retry_levels);
-    p.farthest_sample_count = gi_pref(node, ns, prefix, legacy, "sampling.farthest_sample_count", p.farthest_sample_count);
-    p.local_direction_step_scale = gd_pref(node, ns, prefix, legacy, "sampling.local_direction_step_scale", p.local_direction_step_scale);
-    p.local_gaussian_sigma = gd_pref(node, ns, prefix, legacy, "sampling.local_gaussian_sigma", p.local_gaussian_sigma);
-    p.fallback_uniform_retries = gi_pref(node, ns, prefix, legacy, "sampling.fallback_uniform_retries", p.fallback_uniform_retries);
-
-    p.stale_improve_break_iters = gi_pref(node, ns, prefix, legacy, "termination.stale_improve_break_iters", p.stale_improve_break_iters);
-    p.min_iters_after_goal_before_stale_break = gi_pref(node, ns, prefix, legacy, "termination.min_iters_after_goal_before_stale_break", p.min_iters_after_goal_before_stale_break);
     p.connect_success_every_k = gi_pref(node, ns, prefix, legacy, "termination.connect_success_every_k", p.connect_success_every_k);
     p.connect_success_dist_scale = gd_pref(node, ns, prefix, legacy, "termination.connect_success_dist_scale", p.connect_success_dist_scale);
     p.direct_connect_step_factor = gd_pref(node, ns, prefix, legacy, "termination.direct_connect_step_factor", p.direct_connect_step_factor);
     p.connect_target_tolerance = gd_pref(node, ns, prefix, legacy, "termination.connect_target_tolerance", p.connect_target_tolerance);
 
     p.aapf.enable = gb_pref(node, ns, prefix, legacy, "aapf.enable", p.aapf.enable);
-    p.aapf.ka = gd_pref(node, ns, prefix, legacy, "aapf.ka", p.aapf.ka);
-    p.aapf.kr = gd_pref(node, ns, prefix, legacy, "aapf.kr", p.aapf.kr);
     p.aapf.repulsion_range_m = gd_pref(
         node, ns, prefix, legacy, "aapf.repulsion_range_m", p.aapf.repulsion_range_m);
-    p.aapf.goal_bias_p0 = gd_pref(node, ns, prefix, legacy, "aapf.goal_bias_p0", p.aapf.goal_bias_p0);
-    p.aapf.goal_bias_beta = gd_pref(
-        node, ns, prefix, legacy, "aapf.goal_bias_beta", p.aapf.goal_bias_beta);
-    p.aapf.alpha0 = gd_pref(node, ns, prefix, legacy, "aapf.alpha0", p.aapf.alpha0);
-    p.aapf.beta0 = gd_pref(node, ns, prefix, legacy, "aapf.beta0", p.aapf.beta0);
-    p.aapf.gamma0 = gd_pref(node, ns, prefix, legacy, "aapf.gamma0", p.aapf.gamma0);
-    p.aapf.density_radius_m = gd_pref(
-        node, ns, prefix, legacy, "aapf.density_radius_m", p.aapf.density_radius_m);
-    p.aapf.density_samples = gi_pref(
-        node, ns, prefix, legacy, "aapf.density_samples", p.aapf.density_samples);
-    p.aapf.trap_threshold_iters = gi_pref(
-        node, ns, prefix, legacy, "aapf.trap_threshold_iters", p.aapf.trap_threshold_iters);
-    p.aapf.trap_grace_iters = gi_pref(
-        node, ns, prefix, legacy, "aapf.trap_grace_iters", p.aapf.trap_grace_iters);
-    p.aapf.step_min_m = gd_pref(node, ns, prefix, legacy, "aapf.step_min_m", p.aapf.step_min_m);
-    p.aapf.step_max_m = gd_pref(node, ns, prefix, legacy, "aapf.step_max_m", p.aapf.step_max_m);
-    p.aapf.risk_radius_m = gd_pref(
-        node, ns, prefix, legacy, "aapf.risk_radius_m", p.aapf.risk_radius_m);
-    p.aapf.transition_radius_m = gd_pref(
-        node, ns, prefix, legacy, "aapf.transition_radius_m", p.aapf.transition_radius_m);
-    p.aapf.obstacle_inflation_m = gd_pref(
-        node, ns, prefix, legacy, "aapf.obstacle_inflation_m", p.aapf.obstacle_inflation_m);
-    p.aapf.sobol_workspace_padding_m = gd_pref(
-        node, ns, prefix, legacy, "aapf.sobol_workspace_padding_m", p.aapf.sobol_workspace_padding_m);
-    p.aapf.density_attraction_rho = gd_pref(
-        node, ns, prefix, legacy, "aapf.density_attraction_rho", p.aapf.density_attraction_rho);
-    p.aapf.density_repulsion_rho = gd_pref(
-        node, ns, prefix, legacy, "aapf.density_repulsion_rho", p.aapf.density_repulsion_rho);
-    p.aapf.beta_epsilon = gd_pref(
-        node, ns, prefix, legacy, "aapf.beta_epsilon", p.aapf.beta_epsilon);
-    p.aapf.gamma_mu = gd_pref(node, ns, prefix, legacy, "aapf.gamma_mu", p.aapf.gamma_mu);
-    p.aapf.max_guided_ik_tries = gi_pref(
-        node, ns, prefix, legacy, "aapf.max_guided_ik_tries", p.aapf.max_guided_ik_tries);
-    p.aapf.log_every_n_iters = gi_pref(
-        node, ns, prefix, legacy, "aapf.log_every_n_iters", p.aapf.log_every_n_iters);
-    p.aapf.hard_deadline_ms = gi_pref(
-        node, ns, prefix, legacy, "aapf.hard_deadline_ms", p.aapf.hard_deadline_ms);
+    p.aapf.stall_threshold_iters = gi_pref(
+        node, ns, prefix, legacy,
+        "aapf.stall_threshold_iters", p.aapf.stall_threshold_iters);
     p.aapf.strict_validation_distance = gd_pref(
         node, ns, prefix, legacy,
         "aapf.strict_validation_distance", p.aapf.strict_validation_distance);
-    p.aapf.collision_cooldown_window_iters = gi_pref(
+    p.aapf.adaptive_window = gi_pref(
+        node, ns, prefix, legacy, "aapf.adaptive_window", p.aapf.adaptive_window);
+    p.aapf.adaptive_exploration = gd_pref(
         node, ns, prefix, legacy,
-        "aapf.collision_cooldown_window_iters", p.aapf.collision_cooldown_window_iters);
-    p.aapf.collision_reject_threshold = gi_pref(
+        "aapf.adaptive_exploration", p.aapf.adaptive_exploration);
+    p.aapf.global_min_period = gi_pref(
         node, ns, prefix, legacy,
-        "aapf.collision_reject_threshold", p.aapf.collision_reject_threshold);
-    p.aapf.collision_guided_cooldown_iters = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.collision_guided_cooldown_iters", p.aapf.collision_guided_cooldown_iters);
-    p.aapf.guided_window_iters = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.guided_window_iters", p.aapf.guided_window_iters);
-    p.aapf.guided_attempts_min = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.guided_attempts_min", p.aapf.guided_attempts_min);
-    p.aapf.guided_success_min_ratio = gd_pref(
-        node, ns, prefix, legacy,
-        "aapf.guided_success_min_ratio", p.aapf.guided_success_min_ratio);
-    p.aapf.guided_low_success_cooldown_iters = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.guided_low_success_cooldown_iters", p.aapf.guided_low_success_cooldown_iters);
-    p.aapf.guided_every_k = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.guided_every_k", p.aapf.guided_every_k);
-    p.aapf.rescue_start_ratio = gd_pref(
-        node, ns, prefix, legacy,
-        "aapf.rescue_start_ratio", p.aapf.rescue_start_ratio);
-    p.aapf.finalization_reserve_ms = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.finalization_reserve_ms", p.aapf.finalization_reserve_ms);
-
-    p.aapf.trap_attraction_gain = gd_pref(
-        node, ns, prefix, legacy,
-        "aapf.trap_attraction_gain", p.aapf.trap_attraction_gain);
-    p.aapf.trap_transition_width_ratio = gd_pref(
-        node, ns, prefix, legacy,
-        "aapf.trap_transition_width_ratio", p.aapf.trap_transition_width_ratio);
-    p.aapf.risk_step_span_ratio = gd_pref(
-        node, ns, prefix, legacy,
-        "aapf.risk_step_span_ratio", p.aapf.risk_step_span_ratio);
-
-    p.aapf.rng_seed = static_cast<unsigned int>(std::max(0, gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.rng_seed", static_cast<int>(p.aapf.rng_seed))));
-    p.aapf.rng_seed_stride = static_cast<unsigned int>(std::max(0, gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.rng_seed_stride", static_cast<int>(p.aapf.rng_seed_stride))));
-    p.aapf.sobol_b_start_index = static_cast<unsigned int>(std::max(1, gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.sobol_b_start_index", static_cast<int>(p.aapf.sobol_b_start_index))));
-    p.aapf.sobol_retry_count = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.sobol_retry_count", p.aapf.sobol_retry_count);
-    p.aapf.sobol_uniform_fallback_count = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.sobol_uniform_fallback_count", p.aapf.sobol_uniform_fallback_count);
-    p.aapf.goal_bias_clamp_max = gd_pref(
-        node, ns, prefix, legacy,
-        "aapf.goal_bias_clamp_max", p.aapf.goal_bias_clamp_max);
-    p.aapf.ik_retry_scales = gda_pref(
-        node, ns, prefix, legacy,
-        "aapf.ik_retry_scales", p.aapf.ik_retry_scales);
-
-    p.aapf.max_goal_ik_branches = gi_pref(
-        node, ns, prefix, legacy,
-        "aapf.max_goal_ik_branches", p.aapf.max_goal_ik_branches);
-    p.aapf.branch_min_joint_angle_sep = gd_pref(
-        node, ns, prefix, legacy,
-        "aapf.branch_min_joint_angle_sep", p.aapf.branch_min_joint_angle_sep);
+        "aapf.global_min_period", p.aapf.global_min_period);
 
     p.aapf.min_rewire_radius_ratio = gd_pref(
         node, ns, prefix, legacy,
@@ -449,13 +346,29 @@ v2::PipelineOptions loadPipelineOptions(const rclcpp::Node::SharedPtr& node, con
     v2::PipelineOptions opts;
     opts.planner_config = loadPlannerConfig(node, ns);
     opts.ik_selector_params = loadIKSelectParams(node, ns);
-    opts.enable_path_optimizer = gb(node, ns, "planner.enable_path_optimizer", true);
+    opts.analytical_ik_params = loadAnalyticalIKParams(node, ns);
+    opts.planning_deadline_s = gd(
+        node, ns, "fairino.planner.planning_deadline_s", opts.planning_deadline_s);
+    opts.planning_deadline_s = gd(
+        node, ns, "fairino.benchmark.planning_deadline_s", opts.planning_deadline_s);
+    opts.goal_root_mode = gs(
+        node, ns, "fairino.benchmark.goal_root_mode", opts.goal_root_mode);
+    opts.anytime_checkpoints_s = gda(
+        node, ns, "fairino.benchmark.anytime_checkpoints_s", opts.anytime_checkpoints_s);
+    if (opts.goal_root_mode != "single_root" && opts.goal_root_mode != "multi_root") {
+        throw std::invalid_argument(
+            "fairino.benchmark.goal_root_mode must be single_root or multi_root");
+    }
+    if (!(opts.planning_deadline_s > 0.0)) {
+        throw std::invalid_argument("Fairino planning deadline must be positive");
+    }
+    opts.enable_path_optimizer = gb(node, ns, "fairino.planner.enable_path_optimizer", true);
     opts.optimizer_fail_open_return_original = gb(
-        node, ns, "planner.optimizer_fail_open_return_original", opts.optimizer_fail_open_return_original);
+        node, ns, "fairino.planner.optimizer_fail_open_return_original", opts.optimizer_fail_open_return_original);
     opts.use_multi_obstacle_input = gb(
-        node, ns, "planner.use_multi_obstacle_input", opts.use_multi_obstacle_input);
+        node, ns, "fairino.planner.use_multi_obstacle_input", opts.use_multi_obstacle_input);
     opts.min_obstacle_size_threshold = gd(
-        node, ns, "planner.min_obstacle_size_threshold", opts.min_obstacle_size_threshold);
+        node, ns, "fairino.planner.min_obstacle_size_threshold", opts.min_obstacle_size_threshold);
     opts.optimizer_validation_distance = gd(
         node, ns, "fairino.optimizer.validation_distance", opts.optimizer_validation_distance);
     opts.optimizer_shortcut_trials = gi(
@@ -473,11 +386,11 @@ v2::PipelineOptions loadPipelineOptions(const rclcpp::Node::SharedPtr& node, con
     opts.final_validation_distance = gd(
         node, ns, "fairino.safety.final_validation_distance", opts.final_validation_distance);
     opts.final_validation_fail_open = gb(
-        node, ns, "planner.final_validation_fail_open", opts.final_validation_fail_open);
+        node, ns, "fairino.planner.final_validation_fail_open", opts.final_validation_fail_open);
     opts.trajectory_waypoint_dt = gd(
         node, ns, "fairino.trajectory.waypoint_dt", opts.trajectory_waypoint_dt);
     opts.planner_random_seed = static_cast<unsigned int>(std::max(
-        0, gi(node, ns, "planner.random_seed", static_cast<int>(opts.planner_random_seed))));
+        0, gi(node, ns, "fairino.planner.random_seed", static_cast<int>(opts.planner_random_seed))));
     opts.default_obstacle_origin = vector3From(
         gda(node, ns, "fairino.pipeline.default_obstacle_origin",
             {opts.default_obstacle_origin.x(), opts.default_obstacle_origin.y(), opts.default_obstacle_origin.z()}),

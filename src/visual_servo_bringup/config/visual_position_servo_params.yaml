@@ -94,7 +94,7 @@ common:
         camera_frame: camera_color_optical_frame
         arm_max_velocity: 0.2
         arm_max_acceleration: 0.2
-        allowed_planning_time: 15.0
+        allowed_planning_time: 30.0
         position_tolerance: 0.005
         orientation_tolerance: 0.005
         allowed_start_tolerance: 0.1
@@ -114,7 +114,7 @@ common:
         servo_status_halt_codes: [2, 4, 5]
         aligned_stable_count: 80
       perception:
-        active_source: yolo_kalman # yolo_kalman / aruco
+        active_source: aruco # yolo_kalman / aruco
         yolo_kalman:
           backend: tensorrt
           model_path: yolo-obb-640.engine
@@ -191,11 +191,11 @@ common:
         move_groups: {fairino: /move_group_fairino, kdl: /move_group_kdl}
         ik: {default: fairino}
         pipeline: {default: fairino}
-        planner: {default: tube_birrt*}
+        planner: {default: birrt*}
         readiness: {timeout_sec: 10.0, allow_cross_client_fallback: true}
         ik_moveit_servo: kdl
       controllers:
-        active: NLADRC
+        active: PI_FF
         profiles:
           PID:
             tuning:
@@ -284,7 +284,7 @@ common:
           PI_FF:
             tuning:
               pid_kp: 15.0
-              pid_ki: 6.0
+              pid_ki: 0.0
               pid_kd: 0.0
               pid_d_ema_alpha: 0.8
               pid_derivative_clip: 1.0

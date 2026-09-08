@@ -2,20 +2,13 @@ fairino:
   algorithms:
     aapf_birrt_star:
       max_iterations: 3000
+      post_solution_sample_attempts: 50
       max_step: 0.20
       goal_threshold: 0.08
       goal_bias: 0.20
-      max_ik_tries: 2
       gamma: 1.5
       max_rewire_radius: 0.25
       max_near: 20
-      continue_after_goal: false
-      rewire_after_goal_iters: 50
-      tube_every_k: 8
-      tube_cooldown_len: 20
-      tube_fail_streak_to_cool: 3
-      prob_uniform: 0.12
-      tube_radius: 0.18
       validation_distance: 0.05
 
       connect_max_steps: 20
@@ -23,90 +16,19 @@ fairino:
       rewire_every_k: 3
       rewire_max_neighbors: 5
 
-      sampling:
-        detour_min_height: 0.15
-        detour_vertical_clearance: 0.12
-        detour_min_side_dist: 0.15
-        detour_side_scale: 0.7
-        detour_side_z_offset: 0.05
-        detour_projection_eps: 0.001
-        detour_side_fallback_dist: 0.20
-        tube_orientation_blend_distance_m: 0.35
-        tube_detour_over_threshold: 0.35
-        tube_detour_side_threshold: 0.70
-        tube_segment_switch_prob: 0.50
-        ik_seed_perturb_sigma: 0.20
-        uniform_retry_count: 3
-        local_retry_levels: 3
-        farthest_sample_count: 4
-        local_direction_step_scale: 1.5
-        local_gaussian_sigma: 0.40
-        fallback_uniform_retries: 5
-
       aapf:
         enable: true
-        ka: 1.2
-        kr: 2.0
         repulsion_range_m: 0.24
-        goal_bias_p0: 0.10
-        goal_bias_beta: 0.45
-        alpha0: 0.28
-        beta0: 0.52
-        gamma0: 0.28
-        density_radius_m: 0.12
-        density_samples: 24
-        trap_threshold_iters: 120
-        trap_grace_iters: 120
-        step_min_m: 0.020
-        step_max_m: 0.075
-        risk_radius_m: 0.06
-        transition_radius_m: 0.14
-        obstacle_inflation_m: 0.04
-        sobol_workspace_padding_m: 0.20
-        density_attraction_rho: 0.35
-        density_repulsion_rho: 0.45
-        beta_epsilon: 0.05
-        gamma_mu: 0.05
-        max_guided_ik_tries: 2
-        log_every_n_iters: 200
-        hard_deadline_ms: 2500
+        stall_threshold_iters: 120
         strict_validation_distance: 0.03
-        collision_cooldown_window_iters: 24
-        collision_reject_threshold: 10
-        collision_guided_cooldown_iters: 80
-        guided_window_iters: 20
-        guided_attempts_min: 6
-        guided_success_min_ratio: 0.35
-        guided_low_success_cooldown_iters: 80
-        guided_every_k: 4
-        rescue_start_ratio: 0.50
-        finalization_reserve_ms: 200
-        trap_attraction_gain: 0.5
-        trap_transition_width_ratio: 0.20
-        risk_step_span_ratio: 0.25
-        rng_seed: 7
-        rng_seed_stride: 9973
-        sobol_b_start_index: 8192
-        sobol_retry_count: 64
-        sobol_uniform_fallback_count: 32
-        goal_bias_clamp_max: 0.95
-        # [first_attempt_scale, second_attempt_scale, later_attempt_increment]
-        ik_retry_scales: [1.0, 0.5, 0.25]
-        max_goal_ik_branches: 4
-        branch_min_joint_angle_sep: 0.3
+        adaptive_window: 32
+        adaptive_exploration: 0.7
+        global_min_period: 8
         min_rewire_radius_ratio: 1.2
         shrink_motion_initial_scale: 0.5
         shrink_motion_decay: 0.5
         shrink_motion_attempts: 4
         bridge_node_sep_ratio: 0.25
-
-      termination:
-        stale_improve_break_iters: 60
-        min_iters_after_goal_before_stale_break: 20
-        connect_success_every_k: 2
-        connect_success_dist_scale: 1.8
-        direct_connect_step_factor: 2.0
-        connect_target_tolerance: 0.04
 
       orientation:
         near_dist: 0.12
@@ -115,6 +37,3 @@ fairino:
         ori_near_tol_deg: 1.0
         ori_weight_far: 0.0
         ori_weight_near: 1.0
-
-      fallback:
-        levels: [1.0, 0.12, 0.12, 3.0, 0.15, 0.15, 5.0, 0.20, 0.20, 10.0, 0.25, 0.25]

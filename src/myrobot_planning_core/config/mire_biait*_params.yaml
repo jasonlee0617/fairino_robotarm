@@ -1,0 +1,13 @@
+fairino:
+  algorithms:
+    mire_biait_star:
+      max_iterations: 3000
+      post_solution_sample_attempts: 50
+      batch_size: 64
+      post_solution_batch_size: 10
+      rgg_factor: 1.1
+      effort_focal_factor: 1.10
+      ablation_variant: full
+      enable_effort_focal_queue: true
+      enable_lazy_edge_validation: true
+      validation_distance: 0.03

@@ -22,11 +22,9 @@ class SceneObstacle:
     shape: str = "box"
     size: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     rpy_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    asset: str = ""
     color: Tuple[float, float, float, float] = (0.95, 0.30, 0.05, 0.60)
     radius: Optional[float] = None
     height: Optional[float] = None
-    use_asset_for_sim: bool = True
 
     @classmethod
     def box(cls, name, position, size, rpy_deg=None):
@@ -36,7 +34,6 @@ class SceneObstacle:
             size=size,
             rpy_deg=rpy_deg,
             shape="box",
-            use_asset_for_sim=False,
         )
 
     def __getitem__(self, key):
@@ -65,37 +62,6 @@ class SceneLoader:
         text = str(value).replace(";", ",").replace(" ", ",")
         return [float(v) for v in text.split(",") if v.strip()]
 
-    @staticmethod
-    def _as_bool(value) -> bool:
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
-
-    @classmethod
-    def parse_obstacle_boxes(cls, value):
-        text = str(value).strip()
-        if not text:
-            return []
-
-        boxes = []
-        for spec in text.split(";"):
-            spec = spec.strip()
-            if not spec:
-                continue
-            parts = [p.strip() for p in spec.split(":")]
-            if len(parts) != 3:
-                raise ValueError(
-                    "obstacle_boxes 格式必须为 name:x,y,z:sx,sy,sz;name2:x,y,z:sx,sy,sz")
-            name, position_text, size_text = parts
-            if not name:
-                raise ValueError("obstacle_boxes 中的 name 不能为空")
-            position = tuple(cls._parse_float_list(position_text))
-            size = tuple(cls._parse_float_list(size_text))
-            if len(position) != 3 or len(size) != 3:
-                raise ValueError("obstacle_boxes 中每个 position/size 都必须包含 3 个数值")
-            boxes.append((name, position, size))
-        return boxes
-
     @classmethod
     def make_obstacle(
         cls,
@@ -103,12 +69,10 @@ class SceneLoader:
         position,
         size=None,
         rpy_deg=None,
-        asset="",
         color=None,
         shape="box",
         radius=None,
         height=None,
-        use_asset_for_sim=True,
     ):
         rpy = tuple(float(v) for v in (rpy_deg or (0.0, 0.0, 0.0)))
         rgba = tuple(float(v) for v in (color or (0.95, 0.30, 0.05, 0.60)))
@@ -145,9 +109,7 @@ class SceneLoader:
             radius=radius_value,
             height=height_value,
             rpy_deg=rpy,
-            asset=str(asset or ""),
             color=rgba,
-            use_asset_for_sim=bool(use_asset_for_sim),
         )
 
     def obstacle_from_yaml(self, item: Dict, index: int):
@@ -192,59 +154,58 @@ class SceneLoader:
             position=position,
             size=size,
             rpy_deg=rpy_deg,
-            asset=str(item.get("asset", "")),
             color=color_values,
             shape=shape,
             radius=radius,
             height=height,
-            use_asset_for_sim=self._as_bool(item.get("use_asset_for_sim", True)),
         )
 
-    def load(self, obstacle_boxes, default_name, default_position, default_size):
-        if obstacle_boxes:
-            obstacles = [
-                self.make_obstacle(name, position, size, use_asset_for_sim=False)
-                for name, position, size in obstacle_boxes
-            ]
-            self.logger.info(f"使用 obstacle_boxes 覆盖场景障碍物: count={len(obstacles)}")
-            return obstacles
-
-        if os.path.exists(self.scene_config_file):
-            with open(self.scene_config_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            scenes = data.get("scenes", data)
-            if self.scene_name not in scenes:
-                known = ", ".join(sorted(str(k) for k in scenes.keys()))
-                raise ValueError(
-                    f"scene_name='{self.scene_name}' not found in {self.scene_config_file}. "
-                    f"known scenes: {known}"
-                )
-            scene = scenes[self.scene_name] or {}
-            self.benchmark = scene.get("benchmark", {}) or {}
-            obstacles = [
-                self.obstacle_from_yaml(item, index)
-                for index, item in enumerate(scene.get("obstacles", []))
-            ]
-            self.logger.info(
-                f"加载路径规划场景: scene={self.scene_name}, obstacles={len(obstacles)}, "
-                f"config={self.scene_config_file}"
+    def load(self):
+        if not os.path.isfile(self.scene_config_file):
+            raise FileNotFoundError(
+                f"路径规划场景配置文件不存在，无法加载障碍物: {self.scene_config_file}"
             )
-            if self.benchmark:
-                self.logger.info(
-                    f"场景 benchmark: start_pose={self.benchmark.get('start_pose')}"
-                )
-            return obstacles
 
-        self.logger.warn(
-            f"场景配置文件不存在，回退旧单障碍物参数: {self.scene_config_file}")
-        return [
-            self.make_obstacle(
-                default_name,
-                default_position,
-                default_size,
-                use_asset_for_sim=False,
+        with open(self.scene_config_file, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict) or not data:
+            raise ValueError(
+                f"路径规划场景配置文件为空或格式无效: {self.scene_config_file}"
             )
+
+        scenes = data.get("scenes", data)
+        if not isinstance(scenes, dict) or not scenes:
+            raise ValueError(
+                f"路径规划场景配置文件未定义任何 scene: {self.scene_config_file}"
+            )
+        if self.scene_name not in scenes:
+            known = ", ".join(sorted(str(k) for k in scenes.keys()))
+            raise ValueError(
+                f"scene_name='{self.scene_name}' not found in {self.scene_config_file}. "
+                f"known scenes: {known}"
+            )
+
+        scene = scenes[self.scene_name]
+        if not isinstance(scene, dict):
+            raise ValueError(
+                f"scene '{self.scene_name}' 在 {self.scene_config_file} 中格式无效"
+            )
+        raw_obstacles = scene.get("obstacles")
+        if not isinstance(raw_obstacles, list) or not raw_obstacles:
+            raise ValueError(
+                f"scene '{self.scene_name}' 未定义障碍物，至少需要一个 YAML obstacle"
+            )
+
+        self.benchmark = scene.get("benchmark", {}) or {}
+        obstacles = [
+            self.obstacle_from_yaml(item, index)
+            for index, item in enumerate(raw_obstacles)
         ]
+        self.logger.info(
+            f"加载路径规划场景: scene={self.scene_name}, obstacles={len(obstacles)}, "
+            f"config={self.scene_config_file}"
+        )
+        return obstacles
 
 
 class PlanningSceneManager:
@@ -429,9 +390,8 @@ class MarkerPublisher:
 
 
 class SimSceneSpawner:
-    def __init__(self, scene_name, scene_assets_dir, sim_world, logger):
+    def __init__(self, scene_name, sim_world, logger):
         self.scene_name = scene_name
-        self.scene_assets_dir = scene_assets_dir
         self.sim_world = sim_world
         self.logger = logger
         self.spawned_models = set()
@@ -443,12 +403,38 @@ class SimSceneSpawner:
     def model_name(self, obstacle: SceneObstacle) -> str:
         return f"{self._safe_name(self.scene_name)}_{self._safe_name(obstacle.name)}"
 
-    def asset_path(self, obstacle: SceneObstacle) -> str:
-        if not obstacle.asset:
-            return ""
-        if os.path.isabs(obstacle.asset):
-            return obstacle.asset
-        return os.path.join(self.scene_assets_dir, obstacle.asset)
+    @staticmethod
+    def _format_float(value: float) -> str:
+        return format(float(value), ".12g")
+
+    @classmethod
+    def _geometry_sdf(cls, obstacle: SceneObstacle) -> str:
+        if obstacle.shape == "box":
+            size = " ".join(cls._format_float(value) for value in obstacle.size)
+            return f"<box><size>{size}</size></box>"
+        if obstacle.shape == "cylinder":
+            radius = cls._format_float(obstacle.radius)
+            height = cls._format_float(obstacle.height)
+            return f"<cylinder><radius>{radius}</radius><length>{height}</length></cylinder>"
+        if obstacle.shape == "sphere":
+            radius = cls._format_float(obstacle.radius)
+            return f"<sphere><radius>{radius}</radius></sphere>"
+        raise ValueError(f"Unsupported obstacle shape '{obstacle.shape}'")
+
+    @classmethod
+    def sdf_xml(cls, obstacle: SceneObstacle, model_name: str) -> str:
+        geometry = cls._geometry_sdf(obstacle)
+        color = " ".join(cls._format_float(value) for value in obstacle.color)
+        return (
+            '<?xml version="1.0"?>'
+            '<sdf version="1.9">'
+            f'<model name="{model_name}"><static>true</static><link name="body">'
+            '<gravity>false</gravity>'
+            f'<collision name="collision"><geometry>{geometry}</geometry></collision>'
+            f'<visual name="visual"><geometry>{geometry}</geometry>'
+            f'<material><ambient>{color}</ambient><diffuse>{color}</diffuse></material>'
+            '</visual></link></model></sdf>'
+        )
 
     def remove_model(self, model_name, quiet=False):
         if not model_name:
@@ -481,22 +467,11 @@ class SimSceneSpawner:
 
     def spawn_obstacle(self, obstacle: SceneObstacle):
         model_name = self.model_name(obstacle)
-        if not obstacle.use_asset_for_sim:
-            self.logger.warn(
-                f"跳过仿真场景模型 spawn，use_asset_for_sim=false: name={obstacle.name}")
-            return False
-
-        spawn_path = self.asset_path(obstacle)
-        if not spawn_path or not os.path.exists(spawn_path):
-            self.logger.warn(
-                f"跳过 Gazebo 场景模型 spawn，asset 不存在: name={obstacle.name} asset={spawn_path}")
-            return False
-
         roll, pitch, yaw = [math.radians(v) for v in obstacle.rpy_deg]
         cmd = [
             "ros2", "run", "ros_gz_sim", "create",
             "-world", self.sim_world,
-            "-file", spawn_path,
+            "-string", self.sdf_xml(obstacle, model_name),
             "-name", model_name,
             "-x", str(obstacle.position[0]),
             "-y", str(obstacle.position[1]),
@@ -519,7 +494,7 @@ class SimSceneSpawner:
 
         self.spawned_models.add(model_name)
         self.logger.info(
-            f"Gazebo 场景模型已 spawn: {model_name}, shape={obstacle.shape}, asset={spawn_path}")
+            f"Gazebo 场景模型已 spawn: {model_name}, shape={obstacle.shape}, geometry=yaml")
         return True
 
     def clear(self):
@@ -535,7 +510,6 @@ class SceneEnvironmentManager:
         base_frame_name,
         scene_name,
         scene_config_file,
-        scene_assets_dir,
         sim_world,
         obstacle_marker_topic,
         publish_planning_scene=True,
@@ -561,7 +535,6 @@ class SceneEnvironmentManager:
         )
         self.sim = SimSceneSpawner(
             scene_name,
-            scene_assets_dir,
             sim_world,
             node.get_logger(),
         )
@@ -570,13 +543,8 @@ class SceneEnvironmentManager:
     def benchmark(self):
         return self.loader.benchmark
 
-    def load_scene(self, obstacle_boxes, default_name, default_position, default_size):
-        return self.loader.load(
-            obstacle_boxes,
-            default_name,
-            default_position,
-            default_size,
-        )
+    def load_scene(self):
+        return self.loader.load()
 
     def add_scene(self, obstacles):
         for obstacle in obstacles:

@@ -268,7 +268,7 @@ class GraspnetVisualGraspingNode(Node):
         )
         self.planner_id = PlannerSwitch.normalize_planner(
             self.planning_pipeline_id,
-            str(param(self, "planner_id", "tube_birrt*")),
+            str(param(self, "planner_id", "birrt*")),
         )
         if not PlannerSwitch.is_valid(self.planning_pipeline_id, self.planner_id):
             raise ValueError(
@@ -280,7 +280,7 @@ class GraspnetVisualGraspingNode(Node):
         self.max_step_size = float(param(self, "max_step_size", 0.05))
         self.arm_max_velocity = float(param(self, "arm_max_velocity", 0.6))
         self.arm_max_acceleration = float(param(self, "arm_max_acceleration", 0.6))
-        self.allowed_planning_time = float(param(self, "allowed_planning_time", 15.0))
+        self.allowed_planning_time = float(param(self, "allowed_planning_time", 30.0))
         self.position_tolerance = float(param(self, "position_tolerance", 0.005))
         self.orientation_tolerance = float(param(self, "orientation_tolerance", 0.005))
         self.allowed_start_tolerance = float(param(self, "allowed_start_tolerance", 0.1))

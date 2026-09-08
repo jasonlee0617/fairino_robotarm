@@ -20,6 +20,9 @@ public:
     bool isStateValid(const JointConfig& q) const override;
     bool isMotionValid(const JointConfig& q1, const JointConfig& q2,
                        double validation_distance = 0.10) const override;
+    bool supportsWorldClearance() const override { return true; }
+    ClearanceQueryResult nearestWorldClearance(
+        const JointConfig& q, double influence_distance) const override;
     std::vector<bool> areStatesValid(
         const std::vector<JointConfig>& states) const override;
 

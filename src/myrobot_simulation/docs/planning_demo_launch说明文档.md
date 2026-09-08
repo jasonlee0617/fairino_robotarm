@@ -1,36 +1,43 @@
 # motion_planning_demo_sim.launch.py 路径规划与 IK 对比 Demo 说明
 
-本文档说明唯一规划入口 `myrobot_simulation/launch/motion_planning_demo_sim.launch.py`。它以同一节点复用场景、MoveIt 与 IK 配置：`run_mode:=interactive` 提供终端规划/IK 对比；`run_mode:=benchmark_execution` 运行完整闭环 benchmark；`run_mode:=benchmark_algorithm` 先回 HOME 一次后仅统计规划算法结果，并在节点退出后关闭整套 launch。
+本文档说明唯一规划入口 `myrobot_simulation/launch/motion_planning_demo_sim.launch.py`。它以同一节点复用场景、MoveIt 与 IK 配置：`run_mode:=interactive` 提供终端规划/IK 对比；`run_mode:=goal_collection` 采集可复用目标集；`run_mode:=benchmark_execution` 运行完整 start -> goal -> start 闭环 benchmark；`run_mode:=benchmark_algorithm` 先到配置起点一次后仅统计规划算法结果，并在节点退出后关闭整套 launch。
 
 旧 benchmark 入口、节点与诊断脚本已删除，不保留兼容包装。
 
 ## Benchmark 使用与归档
 
+先采集目标集，再运行 benchmark：
+
 ```bash
-ros2 launch myrobot_simulation motion_planning_demo_sim.launch.py \
-  run_mode:=benchmark_execution
+ros2 launch myrobot_simulation motion_planning_demo_sim.launch.py run_mode:=goal_collection
+ros2 launch myrobot_simulation motion_planning_demo_sim.launch.py run_mode:=benchmark_algorithm
 ```
 
-`benchmark_output_dir` 是 benchmark 唯一 CLI 归档参数；场景、重复次数、种子、目标模式、安全阈值及是否执行均只来自 `config/motion_planning_demo_params.yaml`。每次运行目录都会写入自己的 `benchmark_config.yaml` 与 `generated_goals.csv`；同一 case 下仅允许复用相同的场景 YAML 哈希和 benchmark 条件，不同 `planner_id` 会复用并校验相同 goal。
+`goal_collection_dir` 与 `benchmark_output_dir` 分别归档目标集和运行结果；`planner_random_seed` 是实验变量。目标集身份包含场景、goal seed、数量、手动 `start_id`、完整 `start_joints`、IK 模式、固定姿态、布局签名和采样约束，因此 SR/MR、算法和 planner seed 均加载同一批末端位姿。ROS 运行时仅接受 `format_version: 4` 的目标集；旧 V1/V2/V3 归档不能被 ROS 采集或 benchmark 复用。若同名 `start_id` 的完整身份不一致，直接报错并要求更换 `start_id`。
 
 ```text
-<case>/<planner>_seed<seed>_<timestamp>/
-  benchmark_config.yaml
-  generated_goals.csv
+benchmark_goal_collection/<scene>/goal_seed07_n30_start_id_home/
+  goal_set.csv                 # 仅目标索引与末端位姿
+  goal_set_manifest.yaml       # format_version=4、collection_key、采样身份、CSV SHA256
+  goal_sampling_stats.yaml     # 接受率和各类拒绝统计
+
+trajectory_plan_benchmark_sample/<scene>/goal_seed07_n30/<mr|sr>/<planner_slug>/planner_seed07/<timestamp>/
+  run_manifest.yaml
   results.csv
-  summary.md
+  anytime_trace.csv
+  root_diagnostics.csv
+  algorithm_diagnostics.csv
+  trajectory_paths.csv
 ```
 
-默认 `<case>` 为 `/home/robot/tmp/trajectory_plan_benchmark_cases`。`results.csv` 仅保留规划/闭环成功、失败阶段和错误码、纯规划时间与关节路径长度；执行和回 HOME 仍是闭环成功判定，但不单独计时或归档逐点轨迹审计。
-
-目标首次生成时使用 YAML 的固定 seed、分层候选池和最远点选择；后续 planner 运行从已有运行目录复制并校验 `generated_goals.csv`，保证比较使用同一目标集。旧版本根目录快照会在首次运行时安全迁移到唯一的历史运行目录。
+Benchmark 允许 `rrt*`、`informed_rrt*`、`birrt*`、`aapf_birrt*`、`mire_biait*` 和 `prm`；标准 `rrt` 可单独调用但不参与归档对比。Benchmark 禁用公共 PathOptimizer，故 `results.csv` 使用原始的 `joint_path_length_rad` 和 `tcp_path_length_m` 字段；通用汇总只报告成功率、时间、路径长度及状态/运动碰撞检查与无效边均值。
 
 ## 1. 总体作用
 
 `motion_planning_demo_sim.launch.py` 是交互式路径规划、IK 对比和 benchmark 的顶层入口。它完成三件事：
 
 1. 启动 Gazebo、robot_state_publisher、ros2_control、MoveIt move_group、RViz 等仿真与规划基础设施。
-2. 加载路径规划场景配置，并可同步发布到 MoveIt PlanningScene、RViz Marker 和 Ignition Gazebo 静态 URDF 模型。
+2. 加载路径规划场景配置，并可同步发布到 MoveIt PlanningScene、RViz Marker 和 Ignition Gazebo YAML 动态模型。
 3. 启动 `motion_planning_node_sim.py`，由用户在终端选择路径规划或 Fairino/KDL IK 对比。
 
 典型启动：
@@ -108,7 +115,8 @@ motion_planning_demo_sim.launch.py
 | `base_frame_name` | `base_link` | 输入 pose 与障碍物默认所在坐标系。 |
 | `ee_frame_name` | `tool0` | 末端执行器 link。 |
 | `joint_names` | `j1,j2,j3,j4,j5,j6` | arm joint 顺序。 |
-| `home_joints` | `-1.1170,-1.6214,1.5465,-1.5877,-1.6368,0.0` | HOME 关节位姿，用于 `go home` 或 recover。 |
+| `start_joints` | `-1.1170,-1.6214,1.5465,-1.5877,-1.6368,0.0` | 按 `joint_names` 顺序的关节起点（弧度）；直接校验和执行，不经起点 IK。 |
+| `start_id` | `home` | 仅允许字母和数字的手动起点标识；目标集目录使用它区分不同起点。 |
 
 `planning_client=fairino` 时，节点默认使用 `/move_group_fairino`：
 
@@ -129,16 +137,17 @@ motion_planning_node_sim.py -> pymoveit2 -> /move_group_kdl
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
 | `default_pipeline_id` | `fairino` | MoveIt planning pipeline，例如 `fairino` 或 `ompl`。 |
-| `default_planner_id` | `birrt*` | planner id，例如 `tube_birrt*`、`birrt*`、`rrt*`、`aapf_birrt*`、`RRTConnect`。 |
+| `default_planner_id` | `birrt*` | planner id，例如 `mire_biait*`、`birrt*`、`rrt`、`rrt*`、`informed_rrt*`、`prm`、`aapf_birrt*`、`RRTConnect`。 |
 | `target_rpy_deg` | `0,-180,0` | 用户只输入 `x y z` 时使用的固定末端姿态，单位为度。 |
-| `go_home_before_demo` | `false` | demo 开始前是否先回 HOME。 |
+| `go_start_before_demo` | `false` | interactive 规划 demo 开始前是否先到配置起点。 |
 
 推荐静态配置值：
 
 - Fairino BiRRT*: `default_pipeline_id="fairino"`, `default_planner_id="birrt*"`
 - Fairino RRT*: `default_pipeline_id="fairino"`, `default_planner_id="rrt*"`
+- Fairino Informed-RRT*: `default_pipeline_id="fairino"`, `default_planner_id="informed_rrt*"`
+- Fairino PRM: `default_pipeline_id="fairino"`, `default_planner_id="prm"`
 - Fairino AAPF-BiRRT*: `default_pipeline_id="fairino"`, `default_planner_id="aapf_birrt*"`
-- Fairino Tube-BiRRT*: `default_pipeline_id="fairino"`, `default_planner_id="tube_birrt*"`
 - OMPL RRTConnect: `default_pipeline_id="ompl"`, `default_planner_id="RRTConnect"`
 
 `default_pipeline_id` 和 `default_planner_id` 会进入 `motion_planning_node_sim.py`，然后设置到 `pymoveit2.MoveIt2`：
@@ -154,28 +163,17 @@ self.moveit2_arm.planner_id = algorithm
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
-| `scene_assets_dir` | `myrobot_simulation/config/scenes` | URDF/SDF asset 目录。 |
+| `scene_assets_dir` | `myrobot_simulation/config/scenes` | 兼容保留：未显式设置 `scene_config_file` 时的场景 YAML 目录。 |
 | `scene_config_file` | `myrobot_simulation/config/scenes/pathplanning_scenes_params.yaml` | 场景 YAML。 |
 | `scene_name` | `single_obstacle` | 选择 YAML 中的场景 key。 |
-| `spawn_sim_scene_models` | `true` | 是否把场景 obstacle 的 URDF asset spawn 到 Ignition Gazebo。 |
+| `spawn_sim_scene_models` | `true` | 是否依据场景 YAML 动态生成并 spawn Ignition Gazebo 障碍物。 |
 | `publish_planning_scene` | `true` | 是否把 obstacle 发布到 MoveIt PlanningScene，规划避障以它为权威。 |
 | `publish_obstacle_markers` | `true` | 是否发布 RViz MarkerArray。 |
 | `obstacle_marker_topic` | `/demo_pathplanning/obstacle_markers` | RViz 障碍物 marker topic。 |
-| `obstacle_boxes` | 空 | 直接覆盖 YAML 的临时 box 列表。格式见下文。 |
 
-`obstacle_boxes` 是最高优先级的临时覆盖入口，格式：
-
-```text
-name:x,y,z:sx,sy,sz;name2:x,y,z:sx,sy,sz
-```
-
-例如：
-
-```bash
-NODE_PARAMS["obstacle_boxes"] = "box1:0.35,0.0,0.25:0.1,0.1,0.2;box2:0.45,-0.1,0.20:0.08,0.08,0.16"
-```
-
-如果 `obstacle_boxes` 非空，`SceneLoader` 不再读取 YAML scene obstacles。
+障碍物几何唯一来自 `scene_config_file` 指向的
+`pathplanning_scenes_params.yaml`。配置文件不存在、为空、场景不存在或选定
+场景没有障碍物时，节点直接报错，不再回退到程序内置的单障碍物。
 
 ## 5. 场景选择与发布流程
 
@@ -190,18 +188,41 @@ myrobot_simulation/config/scenes/pathplanning_scenes_params.yaml
 - `single_obstacle`
 - `multi_obstacle_3d_avoidance`
 - `dense_multi_obstacle_3d_avoidance`
+- `dense_hard_multi_obstacle_3d_avoidance`：错位竖直障碍门与窄通道。
+- `dense_extreme_multi_obstacle_3d_avoidance`：保留 dense 的 6 个基础障碍物，恢复相同的目标包围范围，再加入 3 个轻量旋转/错位障碍门组成多阶段通道。
+
+后三个场景构成基线、困难和极限三级测试集。升级场景只新增 YAML 布局，不修改已有
+`dense_multi_obstacle_3d_avoidance`，因此旧 benchmark 结果仍可复用。所有场景共用
+launch 的 `start_joints`，目标仍由障碍物 AABB 内的确定性拒绝采样生成。
+目标筛选只要求目标姿态有有效 IK、目标状态无碰撞并满足间距约束，不用某个规划器
+预先筛掉“难规划”的目标。
+
+难度报告应至少包含障碍物数量/形状、padding 后的最小通道间隙、目标接受率、目标
+表面距离分布、起点到目标直线阻断率和每个目标的有效 IK 数量。目标接受率和直线
+阻断率用于描述场景难度，不能反向用算法成功率定义场景难度。
+
+Extreme 的障碍物设计按机械臂尺寸进行约束：Fairino 机械臂的主要连杆长度约为
+`0.28 m` 和 `0.24 m`，末端工具偏移约为 `0.1168 m`。因此障碍门不能只按 TCP
+点的间隙设计；门的位置和高度先保持在目标 AABB 内，再由带 `0.03 m` padding
+的 MoveIt 完整机器人状态检查验证终点和路径。当前 Extreme 使用中心约为
+`(0.36,0.10,0.26)`、`(0.44,0.00,0.26)`、`(0.58,-0.08,0.26)` 的小型错位门，
+尺寸为 `0.04 x 0.08 x 0.30 m`，旋转角为 `15°/0°/-15°`。这代表多阶段绕障压力，
+不把过大的障碍物直接放入目标采样边界。
+
+目标生成结束后，运行目录中的 `goal_sampling_stats.yaml` 记录候选总数、几何拒绝、
+`rejected_ik_geometry`、`rejected_ik_other`、终点状态碰撞、间距拒绝、接受率和已
+接受目标的障碍物表面距离。IK 的 `D_domain` 拒绝与终点状态碰撞必须分开报告，不能
+混为同一种失败。
 
 每个 scene 可包含：
 
 ```yaml
 benchmark:
-  start_pose: [x, y, z, rx, ry, rz]
-  goal_pose: [x, y, z, rx, ry, rz]
+  difficulty_level: hard
+  difficulty_focus: narrow_staggered_corridors
 obstacles:
   - name: xxx
     shape: box | cylinder | sphere
-    asset: xxx.urdf
-    use_asset_for_sim: true
     pose: [x, y, z, rx, ry, rz]
     size: [sx, sy, sz]      # box
     radius: 0.05            # cylinder/sphere
@@ -227,7 +248,7 @@ motion_planning_node_sim.py（仅路径规划模式）
         |     |-- 发布 MarkerArray 到 /demo_pathplanning/obstacle_markers
         |
         |-- GazeboSceneSpawner
-              |-- ros2 run ros_gz_sim create -file <asset.urdf>
+              |-- ros2 run ros_gz_sim create -string <generated-sdf>
 ```
 
 ### 5.1 MoveIt PlanningScene
@@ -264,25 +285,19 @@ RViz marker 只用于可视化，不参与碰撞判断。发布 topic：
 
 ### 5.3 Ignition Gazebo 静态模型
 
-Gazebo 可视化/物理碰撞来自 URDF asset：
-
-```text
-myrobot_simulation/config/scenes/*.urdf
-```
-
-`GazeboSceneSpawner` 不动态生成 SDF，只调用：
+`GazeboSceneSpawner` 直接从 YAML 的 `shape`、`size` / `radius` / `height`、`color` 和 `pose` 生成静态 SDF：
 
 ```bash
 ros2 run ros_gz_sim create \
   -world <world> \
-  -file <asset.urdf> \
-  -name <scene_name>_<obstacle_name> \
+  -string <generated-sdf> \
+  -name <scene_name>_<model_name> \
   -x <x> -y <y> -z <z> \
   -R <roll> -P <pitch> -Y <yaw> \
   -allow_renaming true
 ```
 
-注意：Gazebo 中的物理碰撞用于仿真显示和接触验证；路径规划避障仍以 MoveIt PlanningScene 为准。
+Gazebo 的 visual 和 collision 均使用 YAML 原始尺寸。路径规划避障仍以 MoveIt PlanningScene 为准，后者会额外应用 `planning_scene_obstacle_padding_m` 安全边界。
 
 ## 6. IK 求解器与 move_group 关系
 
@@ -307,7 +322,7 @@ planning_client=kdl     -> /move_group_kdl
 
 如果设置 `move_group_namespace="/move_group_xxx"`，则显式 namespace 覆盖自动选择。
 
-IK 和规划管线是独立选择的：`planning_client` 只决定 MoveIt/IK client，`default_pipeline_id` 和 `default_planner_id` 共同决定轨迹规划管线与算法。因此允许 `planning_client="kdl", default_pipeline_id="fairino", default_planner_id="tube_birrt*"`，也允许 `planning_client="fairino", default_pipeline_id="ompl", default_planner_id="RRTConnect"`。
+IK 和规划管线是独立选择的：`planning_client` 只决定 MoveIt/IK client，`default_pipeline_id` 和 `default_planner_id` 共同决定轨迹规划管线与算法。因此允许 `planning_client="kdl", default_pipeline_id="fairino", default_planner_id="birrt*"`，也允许 `planning_client="fairino", default_pipeline_id="ompl", default_planner_id="RRTConnect"`。
 
 ## 7. 轨迹规划算法选择
 
@@ -318,7 +333,7 @@ IK 和规划管线是独立选择的：`planning_client` 只决定 MoveIt/IK cli
 
 Fairino pipeline 示例：
 
-`default_pipeline_id="fairino"`，`default_planner_id` 可设为 `birrt*`、`rrt*`、`aapf_birrt*`。
+`default_pipeline_id="fairino"`，`default_planner_id` 可设为 `mire_biait*`、`birrt*`、`rrt`、`rrt*`、`informed_rrt*`、`prm`、`aapf_birrt*`。标准 `rrt` 不允许进入 benchmark。
 
 OMPL 示例：
 
@@ -348,7 +363,7 @@ myrobot_planning_core/config/ik_params.yaml
    set_planner(default_pipeline_id, default_planner_id)
    ```
 2. 若 `auto_add_obstacle=true`，发布当前场景障碍物。
-3. 若 `go_home_before_demo=true`，执行 HOME。
+3. 若 `go_start_before_demo=true`，直接校验并执行 `start_joints`。
 4. 循环读取起点 pose：
    ```text
    x y z rx ry rz
@@ -370,11 +385,11 @@ myrobot_planning_core/config/ik_params.yaml
 支持控制命令：
 
 ```text
-go home
+go start
 recover
 ```
 
-`recover` 会清理场景、回 HOME、重置规划器并清空末端轨迹。
+`recover` 会清理场景、回配置起点、重置规划器并清空末端轨迹。起点无 IK 或起点状态碰撞时直接失败，不回退到关节常量。
 
 IK 对比模式对同一目标调用 `/move_group_fairino/compute_ik` 和 `/move_group_kdl/compute_ik`，报告成功状态、错误码、耗时和关节解差异；它不会加载或修改规划场景，也不会对选中的 IK 解做碰撞规划。
 
@@ -394,20 +409,18 @@ myrobot_simulation/scripts/motion_planning_node_sim.py
   终端模式菜单；路径规划模式负责场景和碰撞规划，IK 模式负责 Fairino/KDL 原始 IK 对比与直接关节执行。
 
 myrobot_simulation/scripts/pathplanning_scene_tools.py
-  场景工具模块：YAML 解析、PlanningScene 发布、RViz marker、Gazebo URDF spawn。
+  场景工具模块：YAML 解析、PlanningScene 发布、RViz marker、Gazebo SDF 动态生成与 spawn。
 
 myrobot_simulation/config/scenes/pathplanning_scenes_params.yaml
-  路径规划 benchmark 场景定义。
-
-myrobot_simulation/config/scenes/*.urdf
-  Gazebo 静态障碍物 asset，带 visual/collision/inertial/gazebo 物理参数。
+  路径规划 benchmark 场景定义，也是 Gazebo、RViz 和 MoveIt 共用的障碍物几何来源；MoveIt 额外施加规划安全边界。
 ```
 
 ## 10. 推荐测试命令
 
-基础单障碍物：
+基础单障碍物场景：
 
-设置 `NODE_PARAMS["scene_name"]="single_obstacle"`，`NODE_PARAMS["default_planner_id"]="birrt*"`。
+设置 `scene_name="single_obstacle"`；该场景也必须存在于
+`pathplanning_scenes_params.yaml` 中，`default_planner_id` 可设为 `birrt*`。
 
 论文简易三维避障场景：
 
@@ -416,6 +429,12 @@ myrobot_simulation/config/scenes/*.urdf
 论文高密度三维避障场景：
 
 设置 `scene_name="dense_multi_obstacle_3d_avoidance"`。
+
+困难/极限分层场景：
+
+分别设置 `scene_name="dense_hard_multi_obstacle_3d_avoidance"` 或
+`scene_name="dense_extreme_multi_obstacle_3d_avoidance"`。建议对每个场景使用相同
+的 goal seed 和 planner seed，并在同一场景目标文件上配对比较所有规划器。
 
 KDL + OMPL 对照：
 
@@ -431,16 +450,11 @@ KDL + OMPL 对照：
 NODE_PARAMS["spawn_sim_scene_models"] = True
 ```
 
-并确认 YAML 中每个 obstacle 有：
-
-```yaml
-asset: xxx.urdf
-use_asset_for_sim: true
-```
+YAML 中每个 obstacle 只需包含对应形状的几何参数与 `pose`。
 
 ### Gazebo 有障碍物，但规划穿过去
 
-说明 Gazebo asset 已加载，但 MoveIt PlanningScene 可能未发布或 move_group 未收到。检查：
+说明 Gazebo 障碍物已生成，但 MoveIt PlanningScene 可能未发布或 move_group 未收到。检查：
 
 ```bash
 publish_planning_scene:=true

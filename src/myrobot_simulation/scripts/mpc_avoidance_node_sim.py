@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gazebo demo: Tube-BiRRT reference trajectories tracked by MPC avoidance."""
+"""Gazebo demo: BiRRT* reference trajectories tracked by MPC avoidance."""
 
 import math
 import threading
@@ -139,7 +139,7 @@ class MPCAvoidanceDemoNode(Node):
         ).rstrip("/")
         self.startup_timeout_sec = float(param(self, "startup_timeout_sec", 60.0))
         self.planning_attempts = int(param(self, "planning_attempts", 5))
-        self.allowed_planning_time = float(param(self, "allowed_planning_time", 15.0))
+        self.allowed_planning_time = float(param(self, "allowed_planning_time", 30.0))
         self.position_tolerance = float(param(self, "position_tolerance", 0.005))
         self.orientation_tolerance = float(param(self, "orientation_tolerance", 0.05))
         self.max_velocity = float(param(self, "max_velocity", 1.0))
@@ -154,7 +154,7 @@ class MPCAvoidanceDemoNode(Node):
         )
         self.planner_id = PlannerSwitch.normalize_planner(
             self.planning_pipeline_id,
-            str(param(self, "planner_id", "tube_birrt*")),
+            str(param(self, "planner_id", "birrt*")),
         )
         if self.ik_plugin not in ("fairino", "kdl"):
             raise RuntimeError(f"Unsupported ik_plugin: {self.ik_plugin}")
@@ -258,7 +258,7 @@ class MPCAvoidanceDemoNode(Node):
         trajectory = self.motion.plan_to_pose(
             target["pose"],
             planning_client=self.ik_plugin,
-            action_name=f"Tube-BiRRT reference to {target['description']}",
+            action_name=f"BiRRT* reference to {target['description']}",
             max_velocity=self.max_velocity,
             max_acceleration=self.max_acceleration,
             allowed_planning_time=self.allowed_planning_time,

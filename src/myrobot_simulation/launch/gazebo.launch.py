@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -50,6 +51,9 @@ _LAUNCH_ARGUMENT_SPECS = (
     ("robot_spawn_delay", "5.0", "机器人生成等待时间（秒）。", None),
     ("controller_spawn_delay", "8.0", "控制器启动等待时间（秒）。", None),
     ("planner_random_seed", "0", "规划器随机种子。", None),
+    ("fairino_ik_task_profile", "grasp", "Fairino IK 任务配置。", ("grasp", "continuous")),
+    ("benchmark_goal_root_mode", "", "Benchmark 目标根模式。", ("", "single_root", "multi_root")),
+    ("benchmark_comparison_json", "{}", "Benchmark 公平公共参数 JSON。", None),
     ("moveit_clients", "fairino,kdl", "启动的 MoveIt client，逗号分隔。", None),
     ("spawn_name", "", "生成实体名称覆盖。", None),
     ("spawn_x", "0.0", "生成 X 坐标（米）。", None),
@@ -138,6 +142,14 @@ def _launch_setup(context, *args, **kwargs):
         for value in LaunchConfiguration("moveit_clients").perform(context).split(",")
         if value.strip()
     )
+    try:
+        benchmark_comparison = json.loads(
+            LaunchConfiguration("benchmark_comparison_json").perform(context)
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError("benchmark_comparison_json must be a JSON object") from exc
+    if not isinstance(benchmark_comparison, dict):
+        raise ValueError("benchmark_comparison_json must be a JSON object")
     actions, moveit_config = base_simulation_actions(
         profile,
         world=LaunchConfiguration("world").perform(context),
@@ -155,6 +167,9 @@ def _launch_setup(context, *args, **kwargs):
         ),
         planner_random_seed=int(LaunchConfiguration("planner_random_seed").perform(context)),
         moveit_clients=moveit_clients,
+        fairino_ik_task_profile=LaunchConfiguration("fairino_ik_task_profile").perform(context),
+        benchmark_goal_root_mode=LaunchConfiguration("benchmark_goal_root_mode").perform(context),
+        benchmark_comparison=benchmark_comparison,
         extra_mappings=extra_mappings,
     )
     if as_bool(LaunchConfiguration("enable_camera_bridge").perform(context)):

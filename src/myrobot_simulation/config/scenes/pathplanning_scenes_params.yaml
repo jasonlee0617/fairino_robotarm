@@ -1,120 +1,192 @@
 scenes:
   single_obstacle:
     description: Single box obstacle for basic Fairino path-planning checks.
-    benchmark:
-      start_pose: [0.30, 0.18, 0.10, 0.0, -180.0, 0.0]
     obstacles:
-      - name: birrt_test_obstacle
+      - name: single_box
         shape: box
-        asset: obstacle.urdf
-        use_asset_for_sim: true
         pose: [0.35, 0.05, 0.28, 0.0, 0.0, 0.0]
         size: [0.18, 0.45, 0.35]
         color: [0.95, 0.30, 0.05, 0.60]
 
   multi_obstacle_3d_avoidance:
     description: Multi-obstacle 3D avoidance scene.
-    benchmark:
-      start_pose: [0.4, 0.20, 0.20, 0.0, -180.0, 0.0]
     obstacles:
-      - name: simple_left_cylinder
+      - name: cylinder1
         shape: cylinder
-        asset: cylinder_r055_h034_static.sdf
-        use_asset_for_sim: true
-        pose: [0.25, 0.32, 0.25, 0.0, 0.0, 0.0]
+        pose: [0.25, 0.26, 0.17, 0.0, 0.0, 0.0]
         radius: 0.055
-        height: 0.34
-        color: [0.10, 0.55, 0.95, 0.62]
-      - name: simple_goal_sphere
-        shape: sphere
-        asset: sphere_r060_static.sdf
-        use_asset_for_sim: true
-        pose: [0.42, -0.10, 0.36, 0.0, 0.0, 0.0]
-        radius: 0.060
-        color: [0.95, 0.85, 0.10, 0.45]
-      - name: simple_lower_sphere
-        shape: sphere
-        asset: sphere_r040_static.sdf
-        use_asset_for_sim: true
-        pose: [0.25, 0.1, 0.17, 0.0, 0.0, 0.0]
-        radius: 0.040
-        color: [0.15, 0.80, 0.85, 0.48]
-      - name: simple_right_box
-        shape: box
-        asset: box_080_080_160_static.sdf
-        use_asset_for_sim: true
-        pose: [0.46, -0.12, 0.20, 0.0, 0.0, 0.0]
-        size: [0.08, 0.08, 0.16]
-        color: [0.95, 0.45, 0.25, 0.58]
-
-  dense_multi_obstacle_3d_avoidance:
-    description: Dense multi-obstacle 3D avoidance scene.
-    benchmark:
-      start_pose: [0.30, 0.20, 0.10, 0.0, -180.0, 0.0]
-    obstacles:
-      - name: dense_left_cylinder
-        shape: cylinder
-        asset: cylinder_r055_h034_static.sdf
-        use_asset_for_sim: true
-        pose: [0.34, 0.13, 0.25, 0.0, 0.0, 0.0]
-        radius: 0.055
-        height: 0.34
-        color: [0.10, 0.55, 0.95, 0.62]
-      - name: dense_goal_sphere
-        shape: sphere
-        asset: sphere_r060_static.sdf
-        use_asset_for_sim: true
-        pose: [0.42, -0.10, 0.37, 0.0, 0.0, 0.0]
-        radius: 0.060
-        color: [0.95, 0.85, 0.10, 0.45]
-      - name: dense_lower_sphere
-        shape: sphere
-        asset: sphere_r040_static.sdf
-        use_asset_for_sim: true
-        pose: [0.35, -0.02, 0.17, 0.0, 0.0, 0.0]
-        radius: 0.040
-        color: [0.15, 0.80, 0.85, 0.48]
-      - name: dense_center_cylinder
-        shape: cylinder
-        asset: cylinder_r075_h034_static.sdf
-        use_asset_for_sim: true
-        pose: [0.37, 0.02, 0.25, 0.0, 0.0, 0.0]
-        radius: 0.075
-        height: 0.34
+        height: 0.50
         color: [0.15, 0.35, 0.95, 0.55]
-      - name: dense_right_sphere
+      - name: multi_sphere2
         shape: sphere
-        asset: sphere_r055_static.sdf
-        use_asset_for_sim: true
-        pose: [0.50, -0.02, 0.23, 0.0, 0.0, 0.0]
-        radius: 0.055
-        color: [0.20, 0.80, 0.80, 0.48]
-      - name: dense_bottom_left_sphere
+        pose: [0.33, -0.15, 0.43, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.95, 0.85, 0.10, 0.45]
+      - name: multi_sphere1
         shape: sphere
-        asset: sphere_r040_static.sdf
-        use_asset_for_sim: true
-        pose: [0.31, 0.03, 0.12, 0.0, 0.0, 0.0]
-        radius: 0.040
-        color: [0.25, 0.25, 0.90, 0.50]
-      - name: dense_bottom_right_sphere
-        shape: sphere
-        asset: sphere_r040_static.sdf
-        use_asset_for_sim: true
-        pose: [0.40, -0.10, 0.13, 0.0, 0.0, 0.0]
-        radius: 0.040
-        color: [0.15, 0.80, 0.85, 0.50]
-      - name: dense_right_front_box
+        pose: [0.25, 0.00, 0.12, 0.0, 0.0, 0.0]
+        radius: 0.08
+        color: [0.15, 0.80, 0.85, 0.48]
+      - name: cube1
         shape: box
-        asset: box_075_075_150_static.sdf
-        use_asset_for_sim: true
-        pose: [0.47, -0.14, 0.18, 0.0, 0.0, 0.0]
-        size: [0.075, 0.075, 0.15]
+        pose: [0.46, -0.12, 0.20, 0.0, 0.0, 0.0]
+        size: [0.1, 0.1, 0.45]
         color: [0.95, 0.45, 0.25, 0.58]
-      - name: dense_left_rear_cylinder
-        shape: cylinder
-        asset: cylinder_r050_h030_static.sdf
-        use_asset_for_sim: true
-        pose: [0.31, 0.18, 0.23, 0.0, 0.0, 0.0]
-        radius: 0.050
-        height: 0.30
+      - name: _sphere3
+        shape: sphere
+        pose: [0.450, 0.25, 0.38, 0.0, 0.0, 0.0]
+        radius: 0.080
         color: [0.25, 0.75, 0.35, 0.55]
+      - name: multi_sphere4
+        shape: sphere
+        pose: [0.55, 0.08, 0.30, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.20, 0.80, 0.80, 0.48]
+
+  dense_obstacle_3d_avoidance-1:
+    description: dense_obstacle_3d_avoidance-1
+    obstacles:
+      - name: cylinder1
+        shape: cylinder
+        pose: [0.25, 0.26, 0.17, 0.0, 0.0, 0.0]
+        radius: 0.055
+        height: 0.50
+        color: [0.15, 0.35, 0.95, 0.55]
+      - name: sphere2
+        shape: sphere
+        pose: [0.33, -0.15, 0.43, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.95, 0.85, 0.10, 0.45]
+      - name: sphere1
+        shape: sphere
+        pose: [0.25, 0.00, 0.12, 0.0, 0.0, 0.0]
+        radius: 0.08
+        color: [0.15, 0.80, 0.85, 0.48]
+      - name: cube1
+        shape: box
+        pose: [0.46, -0.12, 0.20, 0.0, 0.0, 0.0]
+        size: [0.1, 0.1, 0.45]
+        color: [0.95, 0.45, 0.25, 0.58]
+      - name: sphere3
+        shape: sphere
+        pose: [0.450, 0.25, 0.38, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.25, 0.75, 0.35, 0.55]
+      - name: sphere4
+        shape: sphere
+        pose: [0.55, 0.08, 0.30, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.20, 0.80, 0.80, 0.48]
+
+  dense_obstacle_3d_avoidance-2:
+    description: dense_obstacle_3d_avoidance-2
+    benchmark:
+      difficulty_level: hard
+      difficulty_focus: narrow_staggered_corridors
+    obstacles:
+      - name: cylinder1
+        shape: cylinder
+        pose: [0.35, 0.26, 0.17, 0.0, 0.0, 0.0]
+        radius: 0.055
+        height: 0.50
+        color: [0.15, 0.35, 0.95, 0.55]
+      - name: cylinder2
+        shape: cylinder
+        pose: [0.2, 0.26, 0.17, 0.0, 0.0, 0.0]
+        radius: 0.055
+        height: 0.30
+        color: [0.15, 0.35, 0.95, 0.55]
+      - name: sphere2
+        shape: sphere
+        pose: [0.43, -0.15, 0.43, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.95, 0.85, 0.08, 0.45]
+      - name: sphere1
+        shape: sphere
+        pose: [0.35, 0.00, 0.08, 0.0, 0.0, 0.0]
+        radius: 0.08
+        color: [0.15, 0.80, 0.85, 0.48]
+      - name: hard_cube1
+        shape: box
+        pose: [0.56, -0.12, 0.20, 0.0, 0.0, 0.0]
+        size: [0.1, 0.1, 0.45]
+        color: [0.95, 0.45, 0.25, 0.58]
+      - name: sphere3
+        shape: sphere
+        pose: [0.456, 0.013, 0.564, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.25, 0.75, 0.35, 0.55]
+      - name: sphere4
+        shape: sphere
+        pose: [0.364, -0.203, 0.08, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.20, 0.80, 0.80, 0.48]
+      - name: gate1
+        shape: box
+        pose: [0.46, 0.19, 0.30, 0.0, 0.0, 0.0]
+        size: [0.05, 0.12, 0.50]
+        color: [0.80, 0.20, 0.65, 0.62]
+      - name: gate2
+        shape: box
+        pose: [0.57, 0.00, 0.30, 0.0, 0.0, 0.0]
+        size: [0.05, 0.12, 0.50]
+        color: [0.80, 0.20, 0.65, 0.62]
+      - name: bottleneck
+        shape: cylinder
+        pose: [0.49, 0.034, 0.12, 0.0, 0.0, 0.0]
+        radius: 0.045
+        height: 0.20
+        color: [0.95, 0.55, 0.10, 0.62]
+
+  dense_obstacle_3d_avoidance-3:
+    description: Extreme dense scene with a staggered S-shaped multi-stage corridor.
+    benchmark:
+      difficulty_level: extreme
+      difficulty_focus: multi_stage_rotated_bottlenecks
+    obstacles:
+      - name: cylinder1
+        shape: cylinder
+        pose: [0.25, 0.29, 0.17, 0.0, 0.0, 0.0]
+        radius: 0.055
+        height: 0.50
+        color: [0.15, 0.35, 0.95, 0.55]
+      - name: sphere2
+        shape: sphere
+        pose: [0.33, -0.15, 0.48, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.95, 0.85, 0.10, 0.45]
+      - name: sphere1
+        shape: sphere
+        pose: [0.25, 0.06, 0.08, 0.0, 0.0, 0.0]
+        radius: 0.08
+        color: [0.15, 0.80, 0.85, 0.48]
+      - name: cube1
+        shape: box
+        pose: [0.46, -0.12, 0.20, 0.0, 0.0, 0.0]
+        size: [0.1, 0.1, 0.45]
+        color: [0.95, 0.45, 0.25, 0.58]
+      - name: sphere3
+        shape: sphere
+        pose: [0.313, 0.04, 0.5, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.25, 0.75, 0.35, 0.55]
+      - name: sphere4
+        shape: sphere
+        pose: [0.27, -0.15, 0.08, 0.0, 0.0, 0.0]
+        radius: 0.080
+        color: [0.20, 0.80, 0.80, 0.48]
+      - name: gate_a
+        shape: box
+        pose: [0.388, 0.22, 0.25, 0.0, 0.0, 26.0]
+        size: [0.04, 0.08, 0.50]
+        color: [0.80, 0.20, 0.65, 0.62]
+      - name: gate_b
+        shape: box
+        pose: [0.54, 0.20, 0.25, 0.0, 0.0, 0.0]
+        size: [0.04, 0.08, 0.50]
+        color: [0.80, 0.20, 0.65, 0.62]
+      - name: gate_c
+        shape: box
+        pose: [0.51, 0.05, 0.25, 0.0, 0.0, -0.3]
+        size: [0.04, 0.08, 0.50]
+        color: [0.75, 0.15, 0.55, 0.64]

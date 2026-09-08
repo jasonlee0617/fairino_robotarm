@@ -3,8 +3,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,6 +32,365 @@
 namespace fairino_planning::v2 {
 
 namespace {
+
+class CountingCollisionChecker final : public CollisionInterface {
+public:
+    explicit CountingCollisionChecker(std::shared_ptr<CollisionInterface> delegate)
+        : delegate_(std::move(delegate)) {}
+
+    bool isStateValid(const JointConfig& q) const override {
+        ++state_checks_;
+        return delegate_->isStateValid(q);
+    }
+
+    bool isMotionValid(const JointConfig& from, const JointConfig& to,
+                       double validation_distance) const override {
+        ++motion_checks_;
+        const bool valid = delegate_->isMotionValid(from, to, validation_distance);
+        if (valid) ++valid_motion_edges_;
+        else ++invalid_motion_edges_;
+        return valid;
+    }
+
+    bool supportsWorldClearance() const override {
+        return delegate_->supportsWorldClearance();
+    }
+
+    ClearanceQueryResult nearestWorldClearance(
+        const JointConfig& q, double influence_distance) const override {
+        ++clearance_checks_;
+        return delegate_->nearestWorldClearance(q, influence_distance);
+    }
+
+    int stateChecks() const { return state_checks_; }
+    int motionChecks() const { return motion_checks_; }
+    int validMotionEdges() const { return valid_motion_edges_; }
+    int invalidMotionEdges() const { return invalid_motion_edges_; }
+    int clearanceChecks() const { return clearance_checks_; }
+
+private:
+    std::shared_ptr<CollisionInterface> delegate_;
+    mutable int state_checks_ = 0;
+    mutable int motion_checks_ = 0;
+    mutable int valid_motion_edges_ = 0;
+    mutable int invalid_motion_edges_ = 0;
+    mutable int clearance_checks_ = 0;
+};
+
+void appendAnytimeTrace(const PlanResult& result, unsigned int planner_seed) {
+    const char* configured_path = std::getenv("FAIRINO_ANYTIME_TRACE_PATH");
+    if (!configured_path || *configured_path == '\0') return;
+    static std::mutex write_mutex;
+    static std::string active_path;
+    static int run_index = 0;
+    std::lock_guard<std::mutex> lock(write_mutex);
+    const std::string path(configured_path);
+    const bool new_path = path != active_path || !std::filesystem::exists(path);
+    std::ofstream stream(path, std::ios::out | (new_path ? std::ios::trunc : std::ios::app));
+    if (!stream) return;
+    if (new_path) {
+        active_path = path;
+        run_index = 0;
+        stream << "run_index,planner_seed,checkpoint_s,has_solution,incumbent_joint_cost_rad,"
+               << "cumulative_iterations,cumulative_sample_attempts,cumulative_accepted_samples,"
+               << "cumulative_nodes,cumulative_work_units\n";
+    }
+    ++run_index;
+    for (const auto& point : result.anytime_trace) {
+        stream << run_index << ',' << planner_seed << ',' << point.elapsed_s << ','
+               << (point.has_solution ? "true" : "false") << ','
+               << point.incumbent_joint_cost_rad << ',' << point.iterations << ','
+               << point.sample_attempts << ',' << point.accepted_samples << ','
+               << point.num_nodes << ',' << point.work_units << '\n';
+    }
+}
+
+void appendRootDiagnostics(
+    const std::vector<JointConfig>& roots,
+    const std::vector<IKCandidateDiagnostic>& diagnostics,
+    const JointConfig& start,
+    const PlanResult& result,
+    unsigned int planner_seed) {
+    const char* configured_path = std::getenv("FAIRINO_ROOT_DIAGNOSTICS_PATH");
+    if (!configured_path || *configured_path == 0) return;
+    static std::mutex write_mutex;
+    static std::string active_path;
+    static int run_index = 0;
+    std::lock_guard<std::mutex> lock(write_mutex);
+    const std::string path(configured_path);
+    const bool new_path = path != active_path || !std::filesystem::exists(path);
+    std::ofstream stream(path, std::ios::out | (new_path ? std::ios::trunc : std::ios::app));
+    if (!stream) return;
+    if (new_path) {
+        active_path = path;
+        run_index = 0;
+        stream << "run_index,planner_seed,root_index,q1,q2,q3,q4,q5,q6,"
+               << "passed_hard_filter,filter_reason,total_cost,assigned_sample_attempts,"
+               << "accepted_samples,path_improvements,selected_final\n";
+    }
+    ++run_index;
+    std::vector<IKCandidateDiagnostic> records = diagnostics;
+    if (records.empty()) {
+        for (const auto& root : roots) {
+            IKCandidateDiagnostic record;
+            record.q = root;
+            record.passed_hard_filter = true;
+            record.reject_reason = IKRejectReason::kAccepted;
+            record.total_cost = (root - start).norm();
+            records.push_back(record);
+        }
+    }
+    for (size_t index = 0U; index < records.size(); ++index) {
+        const auto& record = records[index];
+        int planning_root = -1;
+        for (size_t root_index = 0U; root_index < roots.size(); ++root_index) {
+            if ((record.q - roots[root_index]).norm() < 1e-8) {
+                planning_root = static_cast<int>(root_index);
+                break;
+            }
+        }
+        bool selected = false;
+        if (result.success && !result.path.empty()) {
+            selected = (result.path.back() - record.q).norm() < 1e-6;
+        }
+        const auto effort_at = [planning_root](const std::vector<int>& values) {
+            return planning_root >= 0 && static_cast<size_t>(planning_root) < values.size()
+                ? values[static_cast<size_t>(planning_root)] : 0;
+        };
+        stream << run_index << "," << planner_seed << "," << index;
+        for (int joint = 0; joint < NUM_JOINTS; ++joint) stream << "," << record.q[joint];
+        const bool accepted_for_planning = planning_root >= 0;
+        const std::string filter_reason = accepted_for_planning
+            ? "" : (record.passed_hard_filter ? "not_selected_for_planning"
+                                                   : toString(record.reject_reason));
+        stream << "," << (accepted_for_planning ? "true" : "false") << ","
+               << filter_reason << ","
+               << record.total_cost << ","
+               << effort_at(result.effort_stats.root_sample_attempts) << ","
+               << effort_at(result.effort_stats.root_accepted_samples) << ","
+               << effort_at(result.effort_stats.root_path_improvements) << ","
+               << (selected ? "true" : "false") << "\n";
+    }
+}
+
+void appendTrajectoryPaths(
+    const std::vector<JointConfig>& raw_path,
+    const std::vector<JointConfig>& final_path,
+    const Transform4d& flange_to_tool,
+    ToolModel tool_model,
+    unsigned int planner_seed) {
+    const char* configured_path = std::getenv("FAIRINO_TRAJECTORY_PATHS_PATH");
+    if (!configured_path || *configured_path == '\0') return;
+    static std::mutex write_mutex;
+    static std::string active_path;
+    static int run_index = 0;
+    std::lock_guard<std::mutex> lock(write_mutex);
+    const std::string path(configured_path);
+    const bool new_path = path != active_path || !std::filesystem::exists(path);
+    std::ofstream stream(path, std::ios::out | (new_path ? std::ios::trunc : std::ios::app));
+    if (!stream) return;
+    if (new_path) {
+        active_path = path;
+        run_index = 0;
+        stream << "run_index,planner_seed,path_stage,waypoint_index,q1,q2,q3,q4,q5,q6,tcp_x,tcp_y,tcp_z\n";
+    }
+    ++run_index;
+    DHKinematics fk;
+    fk.setToolTransform(flange_to_tool);
+    const auto write_path = [&](const char* stage, const std::vector<JointConfig>& values) {
+        for (size_t index = 0U; index < values.size(); ++index) {
+            const Vector3d tcp = fk.fkine(values[index], tool_model).block<3, 1>(0, 3);
+            stream << run_index << ',' << planner_seed << ',' << stage << ',' << index;
+            for (int joint = 0; joint < NUM_JOINTS; ++joint) stream << ',' << values[index][joint];
+            stream << ',' << tcp.x() << ',' << tcp.y() << ',' << tcp.z() << '\n';
+        }
+    };
+    write_path("raw", raw_path);
+    write_path("final", final_path);
+}
+
+void appendSamplingStats(
+    const PlanResult& result,
+    unsigned int planner_seed) {
+    const char* configured_path = std::getenv("FAIRINO_AAPF_STATS_PATH");
+    if (!configured_path || *configured_path == '\0' || result.sampling_stats.empty()) {
+        return;
+    }
+
+    static std::mutex write_mutex;
+    static std::string active_path;
+    static int run_index = 0;
+    std::lock_guard<std::mutex> lock(write_mutex);
+
+    const std::string path(configured_path);
+    const bool new_path = path != active_path || !std::filesystem::exists(path);
+    std::ofstream stream(
+        path,
+        std::ios::out | (new_path ? std::ios::trunc : std::ios::app));
+    if (!stream) {
+        return;
+    }
+    if (new_path) {
+        active_path = path;
+        run_index = 0;
+        stream << "run_index,planner_seed,tree,source,selections,proposals,insertions,"
+               << "progress_events,connections,improvements,clearance_queries,"
+               << "utility_sum,elapsed_ms\n";
+    }
+    ++run_index;
+    for (const auto& stats : result.sampling_stats) {
+        stream << run_index << ',' << planner_seed << ',' << stats.tree_index << ','
+               << stats.source << ',' << stats.selections << ',' << stats.proposals << ','
+               << stats.insertions << ',' << stats.progress_events << ',' << stats.connections
+               << ',' << stats.improvements << ',' << stats.clearance_queries << ','
+               << stats.utility_sum << ',' << stats.elapsed_ms << '\n';
+    }
+}
+
+void appendMireStats(
+    const PlanResult& result,
+    unsigned int planner_seed) {
+    const char* configured_path = std::getenv("FAIRINO_MIRE_STATS_PATH");
+    if (!configured_path || *configured_path == '\0') {
+        return;
+    }
+
+    static std::mutex write_mutex;
+    static std::string active_path;
+    static int run_index = 0;
+    std::lock_guard<std::mutex> lock(write_mutex);
+    const std::string path(configured_path);
+    const bool new_path = path != active_path || !std::filesystem::exists(path);
+    std::ofstream stream(path, std::ios::out | (new_path ? std::ios::trunc : std::ios::app));
+    if (!stream) {
+        return;
+    }
+    if (new_path) {
+        active_path = path;
+        run_index = 0;
+        stream << "run_index,planner_seed,batches,work_units,sample_attempts,accepted_samples,"
+               << "uniform_sample_attempts,informed_sample_attempts,"
+               << "uniform_accepted_samples,informed_accepted_samples,vertices,edges,"
+               << "reverse_queue_pops,reverse_queue_stale_discards,reverse_queue_consistent_discards,"
+               << "forward_edge_pops,goal_tree_edge_pops,"
+               << "sparse_state_checks,edge_validation_calls,"
+               << "final_validation_calls,state_validation_calls,blocked_edges,selected_goal_root,"
+               << "focal_entries_examined,goal_root_count,"
+               << "budget_exhausted,first_solution_time_s,first_solution_path_cost_rad,lower_bound_certified,"
+               << "post_solution_sample_attempts,post_solution_budget_complete,"
+               << "incumbent_improvements,informed_path_improvements,"
+               << "post_cost_search_pops,post_candidate_paths,post_strict_improvements,"
+               << "sparse_rejected_edges,quarter_state_checks,full_invalid_edges_avoided,"
+               << "selected_goal_root_before,selected_goal_root_after,"
+               << "joint_cost_reduction_rad,tcp_cost_reduction_m,"
+               << "root_lower_bounds_rad,root_sample_attempts,root_accepted_samples,root_path_improvements,"
+               << "raw_path_cost_rad\n";
+    }
+    const auto& stats = result.effort_stats;
+    const auto join = [](const auto& values) {
+        std::ostringstream output;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i > 0U) output << ';';
+            output << values[i];
+        }
+        return output.str();
+    };
+    stream << ++run_index << ',' << planner_seed << ',' << stats.batches << ','
+           << stats.work_units << ',' << stats.sample_attempts << ',' << stats.sampled_states << ','
+           << stats.uniform_sample_attempts << ',' << stats.informed_sample_attempts << ','
+           << stats.uniform_accepted_states << ',' << stats.informed_accepted_states << ','
+           << result.num_nodes << ',' << stats.graph_edges << ','
+           << stats.reverse_queue_pops << ',' << stats.reverse_queue_stale_discards << ','
+           << stats.reverse_queue_consistent_discards << ',' << stats.forward_edge_pops << ','
+           << stats.goal_tree_edge_pops << ','
+           << stats.sparse_state_checks << ',' << stats.edge_validation_attempts << ','
+           << stats.final_validation_calls << ',' << stats.state_validation_calls << ','
+           << stats.blocked_edges << ',' << stats.selected_goal_root << ','
+           << stats.focal_entries_examined << ','
+           << stats.goal_root_count << ','
+           << (stats.budget_exhausted ? "true" : "false") << ','
+           << stats.first_solution_time_s << ','
+           << stats.first_solution_path_cost << ','
+           << (stats.lower_bound_certified ? "true" : "false") << ','
+           << stats.post_solution_sample_attempts << ','
+           << (stats.post_solution_budget_complete ? "true" : "false") << ','
+           << stats.incumbent_improvements << ',' << stats.informed_path_improvements << ','
+           << stats.post_cost_search_pops << ',' << stats.post_candidate_paths << ','
+           << stats.post_strict_improvements << ',' << stats.sparse_rejected_edges << ','
+           << stats.quarter_state_checks << ',' << stats.full_invalid_edges_avoided << ','
+           << stats.selected_goal_root_before << ',' << stats.selected_goal_root_after << ','
+           << stats.joint_cost_reduction_rad << ',' << stats.tcp_cost_reduction_m << ','
+           << join(stats.root_lower_bounds) << ',' << join(stats.root_sample_attempts) << ','
+           << join(stats.root_accepted_samples) << ',' << join(stats.root_path_improvements) << ','
+           << result.path_cost << '\n';
+}
+
+void appendPlannerDiagnostics(
+    const PlanResult& result,
+    unsigned int planner_seed,
+    const std::string& planner_id,
+    bool plan_success,
+    double raw_joint_path_cost_rad,
+    double optimized_joint_path_length_rad,
+    double optimized_tcp_path_length_m,
+    double path_optimizer_time_s = 0.0,
+    double joint_turn_total_variation_rad = std::numeric_limits<double>::quiet_NaN(),
+    int waypoint_count = 0,
+    double ik_time_s = 0.0,
+    double root_generation_time_s = 0.0,
+    double final_validation_time_s = 0.0,
+    double trajectory_construction_time_s = 0.0) {
+    const char* configured_path = std::getenv("FAIRINO_PLANNER_DIAGNOSTICS_PATH");
+    if (!configured_path || *configured_path == '\0') return;
+
+    static std::mutex write_mutex;
+    static std::string active_path;
+    static int run_index = 0;
+    std::lock_guard<std::mutex> lock(write_mutex);
+    const std::string path(configured_path);
+    const bool new_path = path != active_path || !std::filesystem::exists(path);
+    std::ofstream stream(path, std::ios::out | (new_path ? std::ios::trunc : std::ios::app));
+    if (!stream) return;
+    if (new_path) {
+        active_path = path;
+        run_index = 0;
+        stream << "run_index,planner_seed,planner_id,plan_success,stop_reason,iterations,sample_attempts,"
+               << "accepted_samples,num_nodes,work_units,graph_edges,optimized_joint_path_length_rad,"
+               << "optimized_tcp_path_length_m,raw_joint_path_cost_rad,"
+               << "joint_turn_total_variation_rad,waypoint_count,"
+               << "first_solution_time_s,first_solution_path_cost_rad,lower_bound_certified,"
+               << "post_solution_sample_attempts,post_solution_budget_complete,"
+               << "collision_state_checks,collision_motion_checks,valid_motion_edges,invalid_motion_edges,"
+               << "valid_motion_edge_efficiency,collision_clearance_checks,"
+               << "path_optimizer_time_s,ik_time_s,root_generation_time_s,search_time_s,"
+               << "final_validation_time_s,trajectory_construction_time_s,goal_root_count,selected_goal_root,"
+               << "total_planning_time_s\n";
+    }
+    stream << ++run_index << ',' << planner_seed << ',' << planner_id << ','
+           << (plan_success ? "true" : "false") << ',' << result.stop_reason << ','
+           << result.iterations << ',' << result.sample_attempts << ','
+           << result.accepted_samples << ',' << result.num_nodes << ','
+           << result.effort_stats.work_units << ',' << result.effort_stats.graph_edges << ','
+           << optimized_joint_path_length_rad << ',' << optimized_tcp_path_length_m << ','
+           << raw_joint_path_cost_rad << ',' << joint_turn_total_variation_rad << ','
+           << waypoint_count << ','
+           << result.first_solution_time_s << ','
+           << result.first_solution_path_cost << ','
+           << (result.lower_bound_certified ? "true" : "false") << ','
+           << result.effort_stats.post_solution_sample_attempts << ','
+           << (result.effort_stats.post_solution_budget_complete ? "true" : "false") << ','
+           << result.collision_state_checks << ',' << result.collision_motion_checks << ','
+           << result.valid_motion_edges << ',' << result.invalid_motion_edges << ','
+           << (result.collision_motion_checks > 0
+                   ? static_cast<double>(result.valid_motion_edges) / result.collision_motion_checks
+                   : 0.0) << ',' << result.collision_clearance_checks << ',' << path_optimizer_time_s << ','
+           << ik_time_s << ',' << root_generation_time_s << ',' << result.planning_time << ','
+           << final_validation_time_s << ',' << trajectory_construction_time_s << ','
+           << result.effort_stats.goal_root_count << ','
+           << result.effort_stats.selected_goal_root << ','
+           << ik_time_s + root_generation_time_s + result.planning_time +
+                  path_optimizer_time_s + final_validation_time_s + trajectory_construction_time_s << '\n';
+}
 
 bool loadFlangeToTool(const moveit::core::RobotModel& model,
                       Transform4d& flange_to_tool) {
@@ -53,6 +417,36 @@ double jointPathLength(const std::vector<JointConfig>& path) {
         length += (path[i] - path[i - 1U]).norm();
     }
     return length;
+}
+
+double tcpPathLength(
+    const std::vector<JointConfig>& path,
+    const Transform4d& flange_to_tool,
+    ToolModel tool_model) {
+    if (path.size() < 2U) return 0.0;
+    DHKinematics fk;
+    fk.setToolTransform(flange_to_tool);
+    Vector3d previous = fk.fkine(path.front(), tool_model).block<3, 1>(0, 3);
+    double length = 0.0;
+    for (size_t i = 1U; i < path.size(); ++i) {
+        const Vector3d current = fk.fkine(path[i], tool_model).block<3, 1>(0, 3);
+        length += (current - previous).norm();
+        previous = current;
+    }
+    return length;
+}
+
+double jointTurnVariation(const std::vector<JointConfig>& path) {
+    double variation = 0.0;
+    for (size_t i = 2U; i < path.size(); ++i) {
+        const JointConfig before = path[i - 1U] - path[i - 2U];
+        const JointConfig after = path[i] - path[i - 1U];
+        if (before.norm() <= 1e-12 || after.norm() <= 1e-12) continue;
+        const double cosine = std::clamp(
+            before.dot(after) / (before.norm() * after.norm()), -1.0, 1.0);
+        variation += std::acos(cosine);
+    }
+    return variation;
 }
 
 std::string goalTipLink(const moveit_msgs::msg::Constraints& constraints) {
@@ -85,6 +479,95 @@ bool copyJointGroupToConfig(
         out[i] = values[i];
     }
     return true;
+}
+
+std::vector<JointConfig> collectGlobalGoalCandidates(
+    const JointConfig& preferred_goal,
+    bool pose_goal,
+    const Transform4d& requested_pose,
+    ToolModel tool_model,
+    const PipelineOptions& options,
+    const Transform4d& flange_to_tool,
+    const MoveItCollisionChecker& collision,
+    std::vector<IKCandidateDiagnostic>* all_diagnostics) {
+    std::vector<JointConfig> candidates;
+    if (all_diagnostics) all_diagnostics->clear();
+    const JointLimits limits;
+    const auto append = [&](const JointConfig& q) {
+        if (!limits.isWithin(q) || !collision.isStateValid(q)) return;
+        for (const auto& existing : candidates) {
+            if ((q - existing).norm() < 1e-9) return;
+        }
+        candidates.push_back(q);
+    };
+
+    append(preferred_goal);
+    if (!pose_goal || options.ik_selector_params.task_profile != IKTaskProfile::Continuous) {
+        return candidates;
+    }
+
+    FairinoIK ik(options.analytical_ik_params);
+    IKSelector selector(options.ik_selector_params);
+    ik.setToolTransform(flange_to_tool);
+    selector.setToolTransform(flange_to_tool);
+    const auto ik_result = ik.solve(requested_pose, tool_model);
+    if (!ik_result.success) return candidates;
+
+    IKSelectionRequest select_request;
+    select_request.solutions = &ik_result.solutions;
+    select_request.seed = preferred_goal;
+    select_request.target_pose = requested_pose;
+    select_request.tool_model = tool_model;
+    select_request.task_profile = IKTaskProfile::Continuous;
+    auto selection = selector.select(select_request);
+    if (all_diagnostics) {
+        *all_diagnostics = selection.diagnostics;
+        const bool preferred_listed = std::any_of(
+            all_diagnostics->begin(), all_diagnostics->end(), [&](const auto& item) {
+                return (item.q - preferred_goal).norm() < 1e-8;
+            });
+        if (!preferred_listed) {
+            IKCandidateDiagnostic preferred;
+            preferred.q = preferred_goal;
+            preferred.passed_hard_filter = !candidates.empty();
+            preferred.reject_reason = preferred.passed_hard_filter
+                ? IKRejectReason::kAccepted : IKRejectReason::kOutsideLimits;
+            preferred.total_cost = (preferred_goal - select_request.seed).norm();
+            all_diagnostics->push_back(preferred);
+        }
+    }
+    std::vector<IKCandidateDiagnostic> accepted;
+    for (const auto& diagnostic : selection.diagnostics) {
+        if (diagnostic.passed_hard_filter) accepted.push_back(diagnostic);
+    }
+    std::sort(accepted.begin(), accepted.end(), [&](const auto& a, const auto& b) {
+        if (a.selected != b.selected) return a.selected;
+        if (std::abs(a.max_abs_dq - b.max_abs_dq) > 1e-9) {
+            return a.max_abs_dq < b.max_abs_dq;
+        }
+        if (std::abs(a.dq_norm - b.dq_norm) > 1e-9) return a.dq_norm < b.dq_norm;
+        return a.total_cost < b.total_cost;
+    });
+
+    const int max_roots = std::max(1, options.ik_selector_params.continuous_max_goal_roots);
+    const double min_separation = std::max(
+        0.0, options.ik_selector_params.continuous_goal_root_min_separation_rad);
+    for (const auto& diagnostic : accepted) {
+        if (static_cast<int>(candidates.size()) >= max_roots) break;
+        bool diverse = true;
+        for (const auto& existing : candidates) {
+            if ((diagnostic.q - existing).norm() < min_separation) {
+                diverse = false;
+                break;
+            }
+        }
+        if (diverse) append(diagnostic.q);
+    }
+    for (const auto& diagnostic : accepted) {
+        if (static_cast<int>(candidates.size()) >= max_roots) break;
+        append(diagnostic.q);
+    }
+    return candidates;
 }
 
 bool validateJointPath(
@@ -176,6 +659,22 @@ bool FairinoPlanningPipeline::solve(
     const std::shared_ptr<PlanningAlgorithm>& algorithm,
     const PipelineOptions& options,
     planning_interface::MotionPlanResponse& res) const {
+    const double configured_deadline_s = std::max(1e-3, options.planning_deadline_s);
+    const double requested_deadline_s = req.allowed_planning_time > 0.0
+        ? req.allowed_planning_time
+        : configured_deadline_s;
+    const double effective_deadline_s = std::min(configured_deadline_s, requested_deadline_s);
+    RCLCPP_INFO(
+        logger_,
+        "Fairino planning deadline: request=%.3fs configured=%.3fs effective=%.3fs",
+        req.allowed_planning_time, configured_deadline_s, effective_deadline_s);
+    const auto request_started = std::chrono::steady_clock::now();
+    const auto request_deadline = request_started + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(effective_deadline_s));
+    const auto request_should_stop = [&]() {
+        return (options.cancel_requested && options.cancel_requested()) ||
+            std::chrono::steady_clock::now() >= request_deadline;
+    };
     if (!scene) {
         RCLCPP_ERROR(logger_, "PlanningScene is null in FairinoPlanningPipeline::solve()");
         res.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
@@ -251,7 +750,8 @@ bool FairinoPlanningPipeline::solve(
 
     JointConfig q_goal = JointConfig::Zero();
     bool goal_found = false;
-    bool require_exact_goal_joint_target = false;
+    bool pose_goal = false;
+    Transform4d requested_pose_goal = Transform4d::Identity();
 
     if (!req.goal_constraints.empty()) {
         const auto& gc = req.goal_constraints[0];
@@ -268,7 +768,6 @@ bool FairinoPlanningPipeline::solve(
                 }
             }
             goal_found = true;
-            require_exact_goal_joint_target = true;
         }
 
         if (!goal_found &&
@@ -312,10 +811,16 @@ bool FairinoPlanningPipeline::solve(
 
                 if (ik_ok && copyJointGroupToConfig(ik_state, jmg, q_goal)) {
                     goal_found = true;
-                    require_exact_goal_joint_target = true;
+                    pose_goal = true;
+                    const Eigen::Quaterniond orientation(
+                        target_pose.orientation.w, target_pose.orientation.x,
+                        target_pose.orientation.y, target_pose.orientation.z);
+                    requested_pose_goal.block<3, 3>(0, 0) = orientation.normalized().toRotationMatrix();
+                    requested_pose_goal.block<3, 1>(0, 3) = Eigen::Vector3d(
+                        target_pose.position.x, target_pose.position.y, target_pose.position.z);
                     RCLCPP_INFO(
                         logger_,
-                        "MoveIt IK candidate accepted: group=%s tip=%s exact_joint_target=true",
+                        "MoveIt IK candidate accepted: group=%s tip=%s",
                         group_name.c_str(),
                         tip_link.empty() ? "<default>" : tip_link.c_str());
                 } else {
@@ -335,6 +840,9 @@ bool FairinoPlanningPipeline::solve(
         return false;
     }
 
+    const double ik_time_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - request_started).count();
+
     const double final_validation_distance =
         std::max(1e-4, options.final_validation_distance);
     PlannerConfig effective_planner_config = options.planner_config;
@@ -350,16 +858,43 @@ bool FairinoPlanningPipeline::solve(
     }
 
     auto collision = std::make_shared<MoveItCollisionChecker>(scene, group_name);
+    auto planning_collision = std::make_shared<CountingCollisionChecker>(collision);
     PlannerEngine engine(algorithm);
-    engine.setCollisionChecker(collision);
+    engine.setCollisionChecker(planning_collision);
     engine.configure(effective_planner_config);
 
     DHKinematics fk(DHParams{}, flange_to_tool);
     const auto T_start = fk.fkine(q_start, tool_model);
-    const auto T_goal = fk.fkine(q_goal, tool_model);
+    const auto T_goal = pose_goal ? requested_pose_goal : fk.fkine(q_goal, tool_model);
     const Vector3d p_start = T_start.block<3, 1>(0, 3);
     const Vector3d p_goal = T_goal.block<3, 1>(0, 3);
     const RotMatrix3d R_target = T_goal.block<3, 3>(0, 0);
+    const auto root_generation_started = std::chrono::steady_clock::now();
+    std::vector<JointConfig> goal_candidates;
+    std::vector<IKCandidateDiagnostic> goal_root_diagnostics;
+    if (options.goal_root_mode == "single_root") {
+        const JointLimits limits;
+        if (limits.isWithin(q_goal) && collision->isStateValid(q_goal)) {
+            goal_candidates.push_back(q_goal);
+            IKCandidateDiagnostic diagnostic;
+            diagnostic.q = q_goal;
+            diagnostic.passed_hard_filter = true;
+            diagnostic.reject_reason = IKRejectReason::kAccepted;
+            diagnostic.total_cost = (q_goal - q_start).norm();
+            diagnostic.selected = true;
+            goal_root_diagnostics.push_back(diagnostic);
+        }
+    } else {
+        goal_candidates = collectGlobalGoalCandidates(
+            q_goal, pose_goal, T_goal, tool_model, options, flange_to_tool, *collision, &goal_root_diagnostics);
+    }
+    const double root_generation_time_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - root_generation_started).count();
+    if (goal_candidates.empty()) {
+        RCLCPP_ERROR(logger_, "No collision-free goal IK root is available.");
+        res.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::GOAL_IN_COLLISION;
+        return false;
+    }
 
     Vector3d obs_origin = options.default_obstacle_origin;
     Vector3d obs_size = options.default_obstacle_size;
@@ -411,6 +946,9 @@ bool FairinoPlanningPipeline::solve(
                 ObstacleInfo info;
                 info.center = obj_pose.translation();
                 info.size = size;
+                info.orientation = obj_pose.rotation();
+                info.shape = std::string(shape_type) == "sphere" ? ObstacleShape::kSphere :
+                    (std::string(shape_type) == "cylinder" ? ObstacleShape::kCylinder : ObstacleShape::kBox);
                 obstacles.push_back(info);
                 object_added = true;
 
@@ -429,6 +967,7 @@ bool FairinoPlanningPipeline::solve(
     PlanRequestCore plan_req;
     plan_req.q_start = q_start;
     plan_req.q_goal = q_goal;
+    plan_req.goal_candidates = goal_candidates;
     plan_req.p_start = p_start;
     plan_req.p_goal = p_goal;
     plan_req.R_target = R_target;
@@ -437,8 +976,11 @@ bool FairinoPlanningPipeline::solve(
     plan_req.obstacles = obstacles;
     plan_req.use_multi_obstacle = !obstacles.empty();
     plan_req.tool_model = tool_model;
-    plan_req.require_exact_goal_joint_target = require_exact_goal_joint_target;
-    plan_req.random_seed = options.planner_random_seed;
+    plan_req.random_seed = options.planner_random_seed == 0U ? 7U : options.planner_random_seed;
+    plan_req.started = request_started;
+    plan_req.deadline = request_deadline;
+    plan_req.cancel_requested = options.cancel_requested;
+    plan_req.anytime_checkpoints_s = options.anytime_checkpoints_s;
 
     if (plan_req.use_multi_obstacle) {
         plan_req.obs_origin = obstacles.front().center;
@@ -453,13 +995,68 @@ bool FairinoPlanningPipeline::solve(
         plan_req.use_multi_obstacle ? "true" : "false");
 
     const std::string planner_name = algorithm->name();
+    if (request_should_stop()) {
+        RCLCPP_WARN(logger_, "Planning deadline or cancellation reached before core search");
+        res.planning_time_ = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - request_started).count();
+        res.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::TIMED_OUT;
+        return false;
+    }
     RCLCPP_INFO(
         logger_,
         "Planner branch selected: %s %s",
         planner_name.c_str(),
         plan_req.use_multi_obstacle ? "multi" : "single");
 
-    const auto result = engine.plan(plan_req);
+    auto result = engine.plan(plan_req);
+    if (request_should_stop() && result.success) {
+        result.success = false;
+        result.failure_code = PlanningFailureCode::kTimeout;
+        result.message = "deadline_reached_after_core_search";
+    }
+    if (result.effort_stats.work_units <= 0) {
+        result.effort_stats.work_units = std::max(0, result.iterations);
+    }
+    result.effort_stats.goal_root_count = static_cast<int>(goal_candidates.size());
+    int selected_planning_root = -1;
+    if (result.success && !result.path.empty()) {
+        double nearest_distance = std::numeric_limits<double>::infinity();
+        for (std::size_t root_index = 0U; root_index < goal_candidates.size(); ++root_index) {
+            const double distance = (result.path.back() - goal_candidates[root_index]).norm();
+            if (distance < nearest_distance) {
+                nearest_distance = distance;
+                selected_planning_root = static_cast<int>(root_index);
+            }
+        }
+    }
+    result.collision_state_checks = planning_collision->stateChecks();
+    result.collision_motion_checks = planning_collision->motionChecks();
+    result.valid_motion_edges = planning_collision->validMotionEdges();
+    result.invalid_motion_edges = planning_collision->invalidMotionEdges();
+    result.collision_clearance_checks = planning_collision->clearanceChecks();
+    appendSamplingStats(result, plan_req.random_seed);
+    appendAnytimeTrace(result, plan_req.random_seed);
+    // MIRE diagnostics use the planner's accepted-root index. The public
+    // benchmark result uses the index in root_diagnostics.csv so that the two
+    // artifacts can be joined even when rejected IK candidates precede it.
+    result.effort_stats.selected_goal_root = selected_planning_root;
+    appendMireStats(result, plan_req.random_seed);
+    result.effort_stats.selected_goal_root = -1;
+    if (selected_planning_root >= 0) {
+        const auto& selected_root = goal_candidates[static_cast<std::size_t>(selected_planning_root)];
+        if (goal_root_diagnostics.empty()) {
+            result.effort_stats.selected_goal_root = selected_planning_root;
+        } else {
+            for (std::size_t diagnostic_index = 0U;
+                 diagnostic_index < goal_root_diagnostics.size(); ++diagnostic_index) {
+                if ((goal_root_diagnostics[diagnostic_index].q - selected_root).norm() < 1e-8) {
+                    result.effort_stats.selected_goal_root = static_cast<int>(diagnostic_index);
+                    break;
+                }
+            }
+        }
+    }
+    appendRootDiagnostics(goal_candidates, goal_root_diagnostics, q_start, result, plan_req.random_seed);
     if (!result.diagnostics.empty()) {
         RCLCPP_INFO(logger_, "%s", result.diagnostics.c_str());
     }
@@ -476,6 +1073,8 @@ bool FairinoPlanningPipeline::solve(
             result.message.c_str());
         RCLCPP_INFO(logger_, "PathOptimizer: skipped (planning failed)");
         RCLCPP_INFO(logger_, "TrajectorySmoother: skipped (planning failed before trajectory export)");
+        res.planning_time_ = result.planning_time;
+        appendPlannerDiagnostics(result, plan_req.random_seed, planner_name, false, 0.0, 0.0, 0.0);
         res.error_code_.val = toMoveItError(result.failure_code);
         return false;
     }
@@ -512,6 +1111,7 @@ bool FairinoPlanningPipeline::solve(
         result.path_cost,
         result.num_nodes,
         result.iterations);
+    double path_optimizer_time_s = 0.0;
     if (path.size() > 2 && options.enable_path_optimizer) {
         OrientationPolicy ori_policy;
         OrientationChecker ori_checker(ori_policy);
@@ -537,7 +1137,7 @@ bool FairinoPlanningPipeline::solve(
             path,
             options.optimizer_shortcut_trials,
             options.optimizer_pull_trials);
-        const double optimizer_time_s =
+        path_optimizer_time_s =
             std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - optimizer_start).count();
         RCLCPP_INFO(
@@ -545,7 +1145,7 @@ bool FairinoPlanningPipeline::solve(
             "PathOptimizer: input_points=%zu output_points=%zu time_s=%.6f",
             optimizer_input_points,
             path.size(),
-            optimizer_time_s);
+            path_optimizer_time_s);
     } else if (path.size() > 2) {
         RCLCPP_INFO(logger_, "PathOptimizer disabled by planner.enable_path_optimizer=false");
     }
@@ -566,6 +1166,7 @@ bool FairinoPlanningPipeline::solve(
         }
     }
 
+    const auto final_validation_started = std::chrono::steady_clock::now();
     int invalid_segment = -1;
     bool final_path_valid = validateJointPath(
         path, collision, final_validation_distance, &invalid_segment);
@@ -587,6 +1188,8 @@ bool FairinoPlanningPipeline::solve(
                 raw_invalid_segment);
         }
     }
+    const double final_validation_time_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - final_validation_started).count();
     RCLCPP_INFO(
         logger_,
         "FinalPathValidator: points=%zu valid=%s invalid_segment=%d validation_distance=%.4f fail_open=%s",
@@ -609,6 +1212,8 @@ bool FairinoPlanningPipeline::solve(
             logger_,
             "FinalPathValidator rejected path; refusing trajectory export and execution");
         RCLCPP_INFO(logger_, "TrajectorySmoother: skipped (final path validation failed)");
+        res.planning_time_ = result.planning_time;
+        appendPlannerDiagnostics(result, plan_req.random_seed, planner_name, false, raw_path_cost, 0.0, 0.0);
         res.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
         return false;
     }
@@ -637,6 +1242,8 @@ bool FairinoPlanningPipeline::solve(
         RCLCPP_ERROR(
             logger_,
             "TrajectoryExportDecimator produced invalid export path; refusing trajectory export");
+        res.planning_time_ = result.planning_time;
+        appendPlannerDiagnostics(result, plan_req.random_seed, planner_name, false, raw_path_cost, 0.0, 0.0);
         res.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
         return false;
     }
@@ -711,6 +1318,8 @@ bool FairinoPlanningPipeline::solve(
                 logger_,
                 "MoveItTrajectoryValidator rejected exported path: points=%zu invalid_index=%lld raw_points=%zu raw_invalid_index=%lld",
                 path.size(), invalid_index, raw_path.size(), raw_invalid_index);
+            res.planning_time_ = result.planning_time;
+            appendPlannerDiagnostics(result, plan_req.random_seed, planner_name, false, raw_path_cost, 0.0, 0.0);
             res.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
             return false;
         }
@@ -725,8 +1334,15 @@ bool FairinoPlanningPipeline::solve(
         "MoveItTrajectoryValidator: points=%zu valid=true",
         path.size());
 
+    appendTrajectoryPaths(raw_path, path, flange_to_tool, tool_model, plan_req.random_seed);
     res.trajectory_ = traj;
     res.planning_time_ = result.planning_time;
+    appendPlannerDiagnostics(
+        result, plan_req.random_seed, planner_name, true, raw_path_cost,
+        jointPathLength(path), tcpPathLength(path, flange_to_tool, tool_model),
+        path_optimizer_time_s,
+        jointTurnVariation(path), static_cast<int>(path.size()),
+        ik_time_s, root_generation_time_s, final_validation_time_s, export_time_s);
     RCLCPP_INFO(
         logger_,
         "TrajectoryTiming: Fairino global path uses TOTG scaling velocity=%.3f acceleration=%.3f",

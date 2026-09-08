@@ -2,6 +2,7 @@
 #include "myrobot_planning_ros/moveit_collision_checker.h"
 #include <cmath>
 #include <moveit/collision_detection/collision_common.h>
+#include <moveit/collision_detection/collision_env.h>
 
 namespace fairino_planning {
 
@@ -80,6 +81,85 @@ bool MoveItCollisionChecker::isMotionValid(
             return false;
     }
     return true;
+}
+
+ClearanceQueryResult MoveItCollisionChecker::nearestWorldClearance(
+    const JointConfig& q, double influence_distance) const {
+    ClearanceQueryResult out;
+    out.supported = true;
+    if (!scene_ || !scene_->getRobotModel() || !jmg_ ||
+        !std::isfinite(influence_distance) || influence_distance <= 0.0) {
+        out.supported = false;
+        return out;
+    }
+
+    moveit::core::RobotState robot_state(scene_->getCurrentState());
+    if (!setJointValues(robot_state, q)) {
+        return out;
+    }
+
+    collision_detection::DistanceRequest request;
+    request.type = collision_detection::DistanceRequestTypes::SINGLE;
+    request.group_name = group_name_;
+    request.enable_nearest_points = true;
+    request.enable_signed_distance = true;
+    request.distance_threshold = influence_distance;
+    request.max_contacts_per_body = 1;
+    request.acm = &scene_->getAllowedCollisionMatrix();
+    request.enableGroup(scene_->getRobotModel());
+
+    collision_detection::DistanceResult result;
+    scene_->getCollisionEnv()->distanceRobot(request, result, robot_state);
+    const auto& nearest = result.minimum_distance;
+    if (!std::isfinite(nearest.distance) || nearest.distance > influence_distance) {
+        return out;
+    }
+
+    int robot_index = -1;
+    if (nearest.body_types[0] == collision_detection::BodyType::ROBOT_LINK) {
+        robot_index = 0;
+    } else if (nearest.body_types[1] == collision_detection::BodyType::ROBOT_LINK) {
+        robot_index = 1;
+    }
+    if (robot_index < 0 || nearest.link_names[robot_index].empty()) {
+        return out;
+    }
+
+    const auto* link = scene_->getRobotModel()->getLinkModel(
+        nearest.link_names[robot_index]);
+    if (!link) {
+        return out;
+    }
+
+    const int obstacle_index = 1 - robot_index;
+    const Vector3d robot_point = nearest.nearest_points[robot_index];
+    const Vector3d obstacle_point = nearest.nearest_points[obstacle_index];
+    Vector3d away = robot_point - obstacle_point;
+    if (away.norm() <= 1e-9) {
+        away = robot_index == 0 ? -nearest.normal : nearest.normal;
+    }
+    if (!away.allFinite() || away.norm() <= 1e-9) {
+        return out;
+    }
+    away.normalize();
+
+    const Eigen::Isometry3d& link_transform = robot_state.getGlobalLinkTransform(link);
+    const Vector3d point_in_link = link_transform.inverse() * robot_point;
+    Eigen::MatrixXd jacobian;
+    if (!robot_state.getJacobian(jmg_, link, point_in_link, jacobian, false) ||
+        jacobian.rows() < 3 || jacobian.cols() != NUM_JOINTS) {
+        return out;
+    }
+
+    const Eigen::VectorXd gradient = jacobian.topRows(3).transpose() * away;
+    if (!gradient.allFinite()) {
+        return out;
+    }
+    out.has_obstacle = true;
+    out.signed_distance = nearest.distance;
+    out.joint_gradient = gradient;
+    out.robot_link = nearest.link_names[robot_index];
+    return out;
 }
 
 std::vector<bool> MoveItCollisionChecker::areStatesValid(

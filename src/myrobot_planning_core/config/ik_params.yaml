@@ -175,6 +175,9 @@ fairino:
 
       # FairinoIKPlugin 自动识别 Cartesian stream 的姿态变化阈值，单位 rad。
       cartesian_stream_max_rot_step_rad: 0.35
+      # Global Continuous pose planning may keep several exact-pose roots.
+      max_goal_roots: 4
+      goal_root_min_separation_rad: 0.3
 
     # ========================================================================
     # 3. Posture — 姿态质量软/工业约束

@@ -18,10 +18,11 @@ fairino:
   safety:
     final_validation_distance: 0.03
 
-planner:
-  enable_path_optimizer: true
-  optimizer_fail_open_return_original: true
-  final_validation_fail_open: false
-  use_multi_obstacle_input: true
-  min_obstacle_size_threshold: 0.001
-  random_seed: 0
+  planner:
+    planning_deadline_s: 30.0
+    enable_path_optimizer: true
+    optimizer_fail_open_return_original: true
+    final_validation_fail_open: false
+    use_multi_obstacle_input: true
+    min_obstacle_size_threshold: 0.001
+    random_seed: 0

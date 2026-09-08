@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gazebo demo for MPC dynamic-obstacle avoidance and tube-BiRRT replanning."""
+"""Gazebo demo for MPC dynamic-obstacle avoidance and BiRRT* replanning."""
 
 import os
 import sys
@@ -41,10 +41,10 @@ _LAUNCH_ARGUMENT_SPECS = (
     ("world_name", "empty", "Gazebo 世界名称。", None),
     ("ik_plugin", "fairino", "MoveIt IK 客户端。", ("fairino", "kdl")),
     ("planning_pipeline_id", "fairino", "MoveIt 规划流水线。", ("fairino", "ompl")),
-    ("planner_id", "tube_birrt*", "初始和重规划使用的规划器。", None),
+    ("planner_id", "birrt*", "初始和重规划使用的规划器。", None),
     ("arm_max_velocity", "1.0", "MoveIt 演示速度比例。", None),
     ("arm_max_acceleration", "1.0", "MoveIt 演示加速度比例。", None),
-    ("allowed_planning_time", "15.0", "MoveIt 演示规划时限。", None),
+    ("allowed_planning_time", "30.0", "MoveIt 演示规划时限。", None),
     ("position_tolerance", "0.005", "MoveIt 演示位置容差。", None),
     ("orientation_tolerance", "0.05", "MoveIt 演示姿态容差。", None),
     ("enable_rviz", "true", "是否启动 RViz。", None),
@@ -171,7 +171,7 @@ def _launch_setup(context, *args, **kwargs):
                     moveit_config.robot_description_semantic,
                     {
                         "use_sim_time": True,
-                        "planner_id": "tube_birrt*",
+                        "planner_id": "birrt*",
                         "ik_plugin": "fairino",
                         "planning_pipeline_id": "fairino",
                         "robot_profile": profile.name,
@@ -183,7 +183,7 @@ def _launch_setup(context, *args, **kwargs):
                         "move_group_ns_fairino": "/move_group_fairino",
                         "move_group_ns_kdl": "/move_group_kdl",
                         "planning_attempts": 5,
-                        "allowed_planning_time": 15.0,
+                        "allowed_planning_time": 30.0,
                         "position_tolerance": 0.005,
                         "orientation_tolerance": 0.05,
                         "max_velocity": 1.0,

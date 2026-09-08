@@ -74,7 +74,7 @@ class _PoseMoveIt(_FakeArm):
     def __init__(self, trajectory):
         super().__init__(has_service=False)
         self.pipeline_id = "fairino"
-        self.planner_id = "tube_birrt*"
+        self.planner_id = "birrt*"
         self.trajectory = trajectory
         self.executed = None
         self.plan_kwargs = None
@@ -259,10 +259,23 @@ def test_ik_client_and_pipeline_are_independent_valid_choices():
     from myrobot_common.planning.motion_executor import PlannerSwitch
 
     for ik, pipeline, planner in (
-        ("fairino", "fairino", "tube_birrt*"),
+        ("fairino", "fairino", "mire_biait*"),
+        ("fairino", "fairino", "birrt*"),
+        ("fairino", "fairino", "rrt"),
+        ("fairino", "fairino", "rrt*"),
+        ("fairino", "fairino", "informed_rrt*"),
+        ("fairino", "fairino", "prm"),
         ("fairino", "ompl", "RRTConnectFast"),
-        ("kdl", "fairino", "tube_birrt*"),
+        ("kdl", "fairino", "birrt*"),
         ("kdl", "ompl", "RRTConnectFast"),
     ):
         assert PlannerSwitch.normalize_ik(ik) == ik
         assert PlannerSwitch.is_valid(pipeline, planner)
+
+
+def test_rrt_and_rrt_star_stay_distinct():
+    from myrobot_common.planning.motion_executor import PlannerSwitch
+
+    assert PlannerSwitch.normalize_planner("fairino", "rrt") == "rrt"
+    assert PlannerSwitch.normalize_planner("fairino", "rrt*") == "rrt*"
+    assert PlannerSwitch.normalize_planner("fairino", "informed-rrt") == "informed_rrt*"

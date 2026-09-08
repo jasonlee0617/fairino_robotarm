@@ -6,7 +6,7 @@
          base_class_type="planning_interface::PlannerManager">
     <description>
       Custom BiRRT*/RRT* planner for Fairino 6-DOF arm with
-      analytical IK, mixed sampling, and orientation constraints.
+      analytical IK and orientation constraints.
     </description>
   </class>
   <!-- IK 求解器插件 -->
@@ -16,4 +16,3 @@
     <description>Analytical IK solver for Fairino 6-DOF arm</description>
   </class>
 </library>
-

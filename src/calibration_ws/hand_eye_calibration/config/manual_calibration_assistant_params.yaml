@@ -23,11 +23,11 @@ manual_calibration_assistant:
       move_group_name: robot_arm
       move_group_ns_fairino: /move_group_fairino
       planning_pipeline_id: fairino
-      planner_id: tube_birrt*
+      planner_id: birrt*
       joint_names: [j1, j2, j3, j4, j5, j6]
       max_velocity: 0.2
       max_acceleration: 0.2
-      allowed_planning_time: 5.0                # 秒
+      allowed_planning_time: 30.0               # 秒
       max_step_size: 0.05                       # 米
       position_tolerance: 0.005                 # 米
       orientation_tolerance: 0.005              # 弧度

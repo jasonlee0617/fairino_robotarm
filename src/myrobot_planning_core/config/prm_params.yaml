@@ -1,0 +1,7 @@
+fairino:
+  algorithms:
+    prm:
+      max_iterations: 3000
+      post_solution_sample_attempts: 50
+      validation_distance: 0.05
+      k_neighbors: 12

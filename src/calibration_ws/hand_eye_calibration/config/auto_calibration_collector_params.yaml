@@ -58,8 +58,8 @@ auto_calibration_collector:
       ik_plugin: fairino
       # 规划流水线 ID (solver 中用于设置 planner)
       planning_pipeline_id: fairino
-      # 规划器 ID (此处使用 tube_birrt*，适合高维路径规划)
-      planner_id: tube_birrt*
+      # 规划器 ID
+      planner_id: birrt*
       # 关节名称列表 (必须与 joint_state 中的名称一致，顺序固定)
       joint_names: [j1, j2, j3, j4, j5, j6]
 
@@ -67,7 +67,7 @@ auto_calibration_collector:
       max_velocity: 0.2
       max_acceleration: 0.2
       # 规划超时时间 (秒)
-      allowed_planning_time: 5.0
+      allowed_planning_time: 30.0
       # 路径插值步长 (单位：米)
       max_step_size: 0.05
       # 目标位置公差 (单位：米)
