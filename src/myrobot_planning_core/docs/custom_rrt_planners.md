@@ -37,12 +37,12 @@ builds a fresh single-query roadmap for each request.
 
 Algorithm-specific parameters live in:
 
-- `myrobot_planning_core/config/birrt*_params.yaml`
+- `myrobot_planning_core/config/birrt_star_params.yaml`
 - `myrobot_planning_core/config/rrt_params.yaml`
-- `myrobot_planning_core/config/rrt*_params.yaml`
+- `myrobot_planning_core/config/rrt_star_params.yaml`
 - `myrobot_planning_core/config/prm_params.yaml`
-- `myrobot_planning_core/config/mire_biait*_params.yaml`
-- `myrobot_planning_core/config/aapf_birrt*_params.yaml`
+- `myrobot_planning_core/config/mire_biait_star_params.yaml`
+- `myrobot_planning_core/config/aapf_birrt_star_params.yaml`
 
 The file names intentionally keep `*`. In the static Gazebo demo launch, set
 `NODE_PARAMS["default_planner_id"]` to `mire_biait*`, `aapf_birrt*`,
@@ -57,9 +57,9 @@ ROS parameter namespaces avoid `*` and use stable internal keys:
 - `fairino.algorithms.prm.*`
 
 `common_planning_params.yaml` contains shared optimizer, trajectory, and pipeline settings. The launch
-stack should load it first, then load `mire_biait*_params.yaml`, `aapf_birrt*_params.yaml`,
-`birrt*_params.yaml`, `rrt_params.yaml`,
-`rrt*_params.yaml`, and `prm_params.yaml`.
+stack should load it first, then load `mire_biait_star_params.yaml`, `aapf_birrt_star_params.yaml`,
+`birrt_star_params.yaml`, `rrt_params.yaml`,
+`rrt_star_params.yaml`, and `prm_params.yaml`.
 
 AAPF-BiRRT* uses only two sampling sources. `Guided` follows the selected IK
 root while a padded MoveIt robot-world clearance query supplies a full-link

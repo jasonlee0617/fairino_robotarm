@@ -67,11 +67,11 @@ def planning_parameter_configs(profile: RobotProfile) -> Dict[str, Any]:
             profile.moveit_config_package, "config/sensors_3d.yaml"
         ),
         "planning_core": load_yaml("myrobot_planning_core", "config/common_planning_params.yaml"),
-        "mire_biait_star_core": load_yaml("myrobot_planning_core", "config/mire_biait*_params.yaml"),
-        "aapf_birrt_star_core": load_yaml("myrobot_planning_core", "config/aapf_birrt*_params.yaml"),
-        "birrt_star_core": load_yaml("myrobot_planning_core", "config/birrt*_params.yaml"),
+        "mire_biait_star_core": load_yaml("myrobot_planning_core", "config/mire_biait_star_params.yaml"),
+        "aapf_birrt_star_core": load_yaml("myrobot_planning_core", "config/aapf_birrt_star_params.yaml"),
+        "birrt_star_core": load_yaml("myrobot_planning_core", "config/birrt_star_params.yaml"),
         "rrt_core": load_yaml("myrobot_planning_core", "config/rrt_params.yaml"),
-        "rrt_star_core": load_yaml("myrobot_planning_core", "config/rrt*_params.yaml"),
+        "rrt_star_core": load_yaml("myrobot_planning_core", "config/rrt_star_params.yaml"),
         "prm_core": load_yaml("myrobot_planning_core", "config/prm_params.yaml"),
         "ik_core": load_yaml("myrobot_planning_core", "config/ik_params.yaml"),
         "cartesian_path_planner": load_yaml(

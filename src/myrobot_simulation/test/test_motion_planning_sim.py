@@ -216,10 +216,10 @@ def test_deadline_and_fixed_post_solution_budget_are_centralized():
 
 def test_normal_fairino_planners_use_the_fixed_post_solution_budget():
     for filename, planner in (
-        ("mire_biait*_params.yaml", "mire_biait_star"),
-        ("aapf_birrt*_params.yaml", "aapf_birrt_star"),
-        ("birrt*_params.yaml", "birrt_star"),
-        ("rrt*_params.yaml", "rrt_star"),
+        ("mire_biait_star_params.yaml", "mire_biait_star"),
+        ("aapf_birrt_star_params.yaml", "aapf_birrt_star"),
+        ("birrt_star_params.yaml", "birrt_star"),
+        ("rrt_star_params.yaml", "rrt_star"),
         ("rrt_params.yaml", "rrt"),
         ("prm_params.yaml", "prm"),
     ):
@@ -235,7 +235,7 @@ def test_normal_fairino_planners_use_the_fixed_post_solution_budget():
         / "launch"
         / "moveit_hardware.launch.py"
     ).read_text(encoding="utf-8")
-    assert '"mire_biait*_params.yaml"' in hardware_launch
+    assert '"mire_biait_star_params.yaml"' in hardware_launch
     assert '"prm_params.yaml"' in hardware_launch
 
 

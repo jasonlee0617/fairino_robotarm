@@ -343,9 +343,9 @@ Fairino 相关参数由 `moveit_stack.py` 注入到启用 Fairino pipeline 的 m
 
 ```text
 myrobot_planning_core/config/common_planning_params.yaml
-myrobot_planning_core/config/aapf_birrt*_params.yaml
-myrobot_planning_core/config/birrt*_params.yaml
-myrobot_planning_core/config/rrt*_params.yaml
+myrobot_planning_core/config/aapf_birrt_star_params.yaml
+myrobot_planning_core/config/birrt_star_params.yaml
+myrobot_planning_core/config/rrt_star_params.yaml
 myrobot_planning_core/config/ik_params.yaml
 ```
 

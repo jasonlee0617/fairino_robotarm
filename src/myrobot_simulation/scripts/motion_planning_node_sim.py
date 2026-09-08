@@ -1418,11 +1418,11 @@ class MotionPlanningNodeSim(Node):
         with open(self.scene_config_file, "rb") as handle:
             scene_hash = hashlib.sha256(handle.read()).hexdigest()
         private_files = {
-            "rrt": "rrt_params.yaml", "rrt_star": "rrt*_params.yaml",
-            "informed_rrt_star": "rrt*_params.yaml",
-            "birrt_star": "birrt*_params.yaml",
-            "aapf_birrt_star": "aapf_birrt*_params.yaml",
-            "mire_biait_star": "mire_biait*_params.yaml", "prm": "prm_params.yaml",
+            "rrt": "rrt_params.yaml", "rrt_star": "rrt_star_params.yaml",
+            "informed_rrt_star": "rrt_star_params.yaml",
+            "birrt_star": "birrt_star_params.yaml",
+            "aapf_birrt_star": "aapf_birrt_star_params.yaml",
+            "mire_biait_star": "mire_biait_star_params.yaml", "prm": "prm_params.yaml",
         }
         planner_dir = os.path.join(get_package_share_directory("myrobot_planning_core"), "config")
         private_params = {}
