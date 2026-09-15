@@ -84,5 +84,5 @@ manual_calibration_assistant:
 
     # output：标定结果保存位置和命名
     output:
-      calibration_output_directory: $HOME/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim
+      calibration_output_directory: $HOME/my-workspace/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim
       calibration_file_prefix: robot_calibration

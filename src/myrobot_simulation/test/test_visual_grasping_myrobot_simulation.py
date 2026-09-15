@@ -194,11 +194,9 @@ def test_nested_sim_values_remain_launch_arguments_and_cli_defaults_exist():
 
 def test_fixed_rviz_and_storage_paths_are_not_launch_configurations():
     source = SOURCE.read_text(encoding="utf-8")
-    assert (
-        '"storage_directory": '
-        '"/home/robot/fairino_robotarm/src/calibration_ws/'
-        'hand_eye_calibration/calib/sim"'
-    ) in source
+    assert ('"storage_directory": os.path.expandvars('
+            '"$HOME/my-workspace/fairino_robotarm/src/calibration_ws/'
+            'hand_eye_calibration/calib/sim")') in source
     assert '"storage_directory": launch_config["storage_directory"]' not in source
     assert '"rviz_config": LaunchConfiguration("rviz_config")' not in source
 
@@ -331,7 +329,7 @@ def test_real_graspnet_entry_matches_the_hardware_rgbd_and_moveit_contract():
         '"handeye_publisher.py"',
         '"retime_server.launch.py"',
         '"graspnet_grasping.rviz"',
-        '"storage_directory": str(Path.home() / "fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/real")',
+        '"storage_directory": default_storage_directory("real")',
         "TimerAction(period=3.0",
         "TimerAction(period=8.0",
     ):

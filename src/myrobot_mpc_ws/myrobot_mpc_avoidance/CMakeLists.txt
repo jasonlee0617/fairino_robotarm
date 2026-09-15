@@ -332,7 +332,7 @@ install(DIRECTORY include/
     DESTINATION include
 )
 
-install(DIRECTORY config docs rviz
+install(DIRECTORY config rviz
     DESTINATION share/${PROJECT_NAME}
 )
 

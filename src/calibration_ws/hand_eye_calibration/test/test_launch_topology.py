@@ -138,6 +138,40 @@ def test_handeye_launches_keep_profiles_in_the_shared_helper():
     assert '"calibration_output_directory": storage_directory' in assisted_source
 
 
+def test_all_handeye_publisher_launches_use_migrated_storage_paths():
+    source_root = Path(__file__).resolve().parents[3]
+    launches = (
+        "graspnet_ws/graspnet_bringup/launch/graspnet_grasping.launch.py",
+        "llm_arm_control/launch/llm_robot_control.launch.py",
+        "myrobot_simulation/launch/graspnet_grasping_sim.launch.py",
+        "myrobot_simulation/launch/visual_grasping_sim.launch.py",
+        "visual_grasping_bringup/launch/perception.demo.launch.py",
+        "visual_grasping_bringup/launch/visual_grasping.launch.py",
+        "visual_grasping_bringup/launch/visual_octmap.launch.py",
+        "visual_servo_bringup/launch/perception.demo.launch.py",
+        "visual_servo_bringup/launch/visual_image_servo.launch.py",
+        "visual_servo_bringup/launch/visual_position_servo.launch.py",
+    )
+    migrated = {
+        "graspnet_ws/graspnet_bringup/launch/graspnet_grasping.launch.py",
+        "llm_arm_control/launch/llm_robot_control.launch.py",
+        "visual_servo_bringup/launch/visual_image_servo.launch.py",
+        "visual_servo_bringup/launch/visual_position_servo.launch.py",
+    }
+
+    for relative_path in launches:
+        source = (source_root / relative_path).read_text(encoding="utf-8")
+        assert "/home/robot/fairino_robotarm" not in source
+        assert "Path.home()" not in source
+        if relative_path in migrated:
+            assert 'default_storage_directory("real")' in source
+
+    image_servo = (source_root / "visual_servo_bringup/launch/visual_image_servo.launch.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'default_storage_directory("real"), "image_servo_aruco_id1.yaml"' in image_servo
+
+
 def test_follow_aruco_move_uses_hardware_moveit_and_shared_global_motion():
     launch = _source("follow_aruco_move.launch.py")
     follower = (LAUNCH_ROOT.parent / "scripts" / "follow_aruco_marker.py").read_text(

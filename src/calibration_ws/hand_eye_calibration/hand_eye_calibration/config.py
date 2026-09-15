@@ -349,7 +349,7 @@ def _load_config(node, filename: str, node_name: str, *, with_waypoints: bool):
         ground_truth_max_rotation_error_deg=_param(node, "ground_truth_max_rotation_error_deg", d("ground_truth_max_rotation_error_deg", 1.0), float),
         calibration_output_directory=os.path.expanduser(os.path.expandvars(_param(
             node, "calibration_output_directory",
-            d("calibration_output_directory", "$HOME/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim"), str,
+            d("calibration_output_directory", "$HOME/my-workspace/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim"), str,
         ))),
         calibration_file_prefix=_param(node, "calibration_file_prefix", d("calibration_file_prefix", "robot_calibration"), str),
         moveit_ready_timeout=_param(node, "moveit_ready_timeout", d("moveit_ready_timeout", 30.0), float),

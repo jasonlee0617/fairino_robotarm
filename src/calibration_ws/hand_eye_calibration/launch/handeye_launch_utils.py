@@ -1,4 +1,4 @@
-from pathlib import Path
+import os
 from types import MappingProxyType
 
 from launch.substitutions import LaunchConfiguration
@@ -27,9 +27,9 @@ _HAND_EYE_PROFILES = MappingProxyType({
 
 
 def default_storage_directory(mode: str) -> str:
-    return str(
-        Path.home() / "fairino_robotarm" / "src" / "calibration_ws"
-        / "hand_eye_calibration" / "calib" / mode
+    return os.path.expandvars(
+        f"$HOME/my-workspace/fairino_robotarm/src/calibration_ws/"
+        f"hand_eye_calibration/calib/{mode}"
     )
 
 

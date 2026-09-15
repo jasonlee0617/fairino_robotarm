@@ -140,10 +140,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")
   install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
 endif()
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/docs")
-  install(DIRECTORY docs/ DESTINATION share/${PROJECT_NAME}/docs)
-endif()
-
 # ─── 测试 ───
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

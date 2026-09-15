@@ -15,7 +15,6 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')), 
-        (os.path.join('share', package_name, 'docs'), glob('docs/*.md')),
         (os.path.join('share', package_name, 'config'), glob('config/*.sdf')),
         (os.path.join('share', package_name, 'config'), glob('config/*.urdf')),
         (os.path.join('share', package_name, 'config'), glob('config/*.xacro')),

@@ -1,7 +1,7 @@
 
 # easy_handeye2: automated, hardware-independent Hand-Eye Calibration for ROS2
 
-<img src="docs/img/eye_on_base_ndi_pic.png" width="345"/> <img src="docs/img/05_calibrated_rviz.png" width="475"/> 
+<img src="../../docs/calibration-and-hardware/easy-handeye/img/eye_on_base_ndi_pic.png" width="345"/> <img src="../../docs/calibration-and-hardware/easy-handeye/img/05_calibrated_rviz.png" width="475"/>
 
 
 This package provides functionality and a GUI to: 
@@ -42,7 +42,7 @@ If you are unfamiliar with Tsai's hand-eye calibration [1], it can be used in tw
   optical frame of a camera standing on a tripod next to the robot. In this case you can attach a marker,
   e.g. an AR marker, to the end-effector of the robot.
   
-A relevant example of an eye-on-base calibration is finding the position of an RGBD camera with respect to a robot for object collision avoidance, e.g. [with MoveIt!](http://docs.ros.org/indigo/api/moveit_tutorials/html/doc/pr2_tutorials/planning/src/doc/perception_configuration.html): an [example launch file](docs/example_launch/ur5_kinect_calibration.launch) is provided to perform this common task between an Universal Robot and a Kinect through aruco. eye-on-hand can be used for [vision-guided tasks](https://youtu.be/nBTflbxYGkI?t=24s).
+A relevant example of an eye-on-base calibration is finding the position of an RGBD camera with respect to a robot for object collision avoidance, e.g. [with MoveIt!](http://docs.ros.org/indigo/api/moveit_tutorials/html/doc/pr2_tutorials/planning/src/doc/perception_configuration.html): an `calibrate.launch.py` is provided to perform this common task between an Universal Robot and a Kinect through aruco. eye-on-hand can be used for [vision-guided tasks](https://youtu.be/nBTflbxYGkI?t=24s).
 
 The (arguably) best part is, that you do not have to care about the placement of the auxiliary marker
 (the one on the table in the eye-in-hand case, or on the robot in the eye-on-base case). The algorithm
@@ -51,7 +51,7 @@ will "erase" that transformation out, and only return the transformation you are
 
 eye-on-base             |  eye-on-hand
 :-------------------------:|:-------------------------:
-![](docs/img/eye_on_base_aruco_pic.png)  |  ![](docs/img/eye_on_hand_aruco_pic.png)
+![](../../docs/calibration-and-hardware/easy-handeye/img/eye_on_base_aruco_pic.png)  |  ![](../../docs/calibration-and-hardware/easy-handeye/img/eye_on_hand_aruco_pic.png)
 
 ## Getting started
 
@@ -143,7 +143,7 @@ to accept or discard each sample. At the end, the parameters will be saved in a 
 
 **WARNING**: this will only be available for Iron, and is work-in-progress
 
-A GUI for automatic robot movement is provided by the `rqt_easy_handeye` package. Please refer to [its documentation](rqt_easy_handeye/README.md).
+A GUI for automatic robot movement is provided by the `rqt_easy_handeye` package. Please refer to the `rqt_easy_handeye` package documentation.
 
 This is optional, and can be disabled in both aforementioned cases with:
 ```xml
@@ -162,7 +162,7 @@ RViz before starting to acquire samples (the robot driver may not work while the
 The same applies to the validity of the samples. For the calibration to be found reliably, the end effector must be rotated as much as possible 
 (up to 90°) about each axis, in both directions. Translating the end effector is not necessary, but can't hurt either.
 
-<img src="docs/img/02_plan_movements.png" width="345"/> <img src="docs/img/04_plan_show.png" width="495"/>
+<img src="../../docs/calibration-and-hardware/easy-handeye/img/02_plan_movements.png" width="345"/> <img src="../../docs/calibration-and-hardware/easy-handeye/img/04_plan_show.png" width="495"/>
 
 #### Tips for accuracy
 
@@ -200,11 +200,11 @@ nodes (e.g. with `rqt_launch`), if you don't want to shut down the whole system.
 
 ### FAQ
 #### Why is the calibration wrong?
-Please check the [troubleshooting](docs/troubleshooting.md)
+Please check the [troubleshooting](../../docs/calibration-and-hardware/easy-handeye/troubleshooting.md)
 
 #### How can I ...
 ##### Calibrate an RGBD camera (e.g. Kinect, Xtion, ...) with a robot for automatic object collision avoidance with MoveIt! ?
-This is a perfect example of an eye-on-base calibration. You can take a look at this [example launch file](docs/example_launch/ur5_kinect_calibration.launch) written for an UR5 and a Kinect via aruco_ros, or [example for LWR iiwa with Xtion/Kinect ](docs/example_launch/iiwa_kinect_xtion_calibration.launch).
+This is a perfect example of an eye-on-base calibration. You can take a look at this `calibrate.launch.py` written for an UR5 and a Kinect via aruco_ros, or `calibrate.launch.py`.
 ##### Disable the automatic robotic movements GUI?
 You can pass the argument `freehand_robot_movement:=true` to `calibrate.launch`.
 ##### Calibrate one robot against multiple tracking systems?

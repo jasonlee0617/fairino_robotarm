@@ -85,10 +85,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config")
   install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 endif()
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/docs")
-  install(DIRECTORY docs/ DESTINATION share/${PROJECT_NAME}/docs)
-endif()
-
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_aapf_bi_rrt_star test/test_aapf_bi_rrt_star.cpp)

@@ -391,7 +391,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /aruco_marker/visualization
+        Value: /camera/camera/color/image_raw
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: false

@@ -1,6 +1,5 @@
 import os
 import shlex
-from pathlib import Path
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
@@ -164,7 +163,7 @@ def _launch_setup(context):
         parameters=[{
             "use_sim_time": launch_config["use_sim_time"],
             "calibration_name": launch_config["calibration_name"],
-            "storage_directory": str(Path.home() / "fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim"),
+            "storage_directory": os.path.expandvars("$HOME/my-workspace/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim"),
         }],
         output="screen",
     )

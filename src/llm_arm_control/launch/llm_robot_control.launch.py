@@ -32,7 +32,7 @@ _HANDEYE_LAUNCH_DIR = os.path.join(
 if _HANDEYE_LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _HANDEYE_LAUNCH_DIR)
 from myrobot_common.camera.launch import camera_launch
-from handeye_launch_utils import value  # noqa: E402
+from handeye_launch_utils import default_storage_directory, value  # noqa: E402
 
 
 _TASK_PARAMETERS = load_node_parameters_yaml(
@@ -183,10 +183,7 @@ def _launch_setup(context):
         parameters=[{
             "use_sim_time": use_sim_time,
             "calibration_name": "robot_calibration",
-            "storage_directory": str(
-                Path.home()
-                / "fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/real"
-            ),
+            "storage_directory": default_storage_directory("real"),
         }],
     )
 

@@ -137,7 +137,7 @@ def _launch_setup(context):
             {
                 "use_sim_time": launch_config["use_sim_time"],
                 "calibration_name": launch_config["calibration_name"],
-                "storage_directory": "/home/robot/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim",
+                "storage_directory": os.path.expandvars("$HOME/my-workspace/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/sim"),
             },
         ],
         output="screen",

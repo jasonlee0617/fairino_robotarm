@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
 import sys
-from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -31,7 +30,7 @@ if _HANDEYE_LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _HANDEYE_LAUNCH_DIR)
 
 from myrobot_common.camera.launch import camera_launch
-from handeye_launch_utils import value  # noqa: E402
+from handeye_launch_utils import default_storage_directory, value  # noqa: E402
 
 
 _VISUAL_SERVO_YAML_DEFAULTS = visual_servo_parameters("real")
@@ -265,10 +264,7 @@ def _launch_setup(context):
         parameters=[{
             "use_sim_time": use_sim_time,
             "calibration_name": "robot_calibration",
-            "storage_directory": str(
-                Path.home()
-                / "fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/real"
-            ),
+            "storage_directory": default_storage_directory("real"),
         }],
     )
     retime = IncludeLaunchDescription(

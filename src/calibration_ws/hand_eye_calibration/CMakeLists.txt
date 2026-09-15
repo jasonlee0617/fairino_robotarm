@@ -8,7 +8,7 @@ find_package(ros2_aruco_interfaces REQUIRED)
 
 ament_python_install_package(hand_eye_calibration)
 
-install(DIRECTORY launch config rviz docs
+install(DIRECTORY launch config rviz
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
 )

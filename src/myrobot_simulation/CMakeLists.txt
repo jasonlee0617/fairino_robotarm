@@ -39,7 +39,6 @@ install(
     config
     rviz
     worlds
-    docs
   DESTINATION
     share/${PROJECT_NAME}/
 )

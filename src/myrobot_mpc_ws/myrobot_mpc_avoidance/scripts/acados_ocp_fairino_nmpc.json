@@ -1,7 +1,7 @@
 {
     "code_gen_opts": {
-        "acados_include_path": "/home/robot/fairino_robotarm/src/myrobot_mpc_ws/mpc_toolbox/acados/include",
-        "acados_lib_path": "/home/robot/fairino_robotarm/src/myrobot_mpc_ws/mpc_toolbox/acados/lib",
+        "acados_include_path": "/home/robot/my-workspace/fairino_robotarm/src/myrobot_mpc_ws/mpc_toolbox/acados/include",
+        "acados_lib_path": "/home/robot/my-workspace/fairino_robotarm/src/myrobot_mpc_ws/mpc_toolbox/acados/lib",
         "acados_link_libs": {
             "clarabel": "",
             "daqp": "",
@@ -13,12 +13,12 @@
             "qpoases": "-lqpOASES_e"
         },
         "acados_version": "e0759960c",
-        "code_export_directory": "/home/robot/fairino_robotarm/src/myrobot_mpc_ws/myrobot_mpc_avoidance/c_generated_code_nmpc",
+        "code_export_directory": "/home/robot/my-workspace/fairino_robotarm/src/myrobot_mpc_ws/myrobot_mpc_avoidance/c_generated_code_nmpc",
         "cython_include_dirs": [
             "/usr/lib/python3/dist-packages/numpy/core/include",
             "/usr/include/python3.10"
         ],
-        "json_file": "/home/robot/fairino_robotarm/src/myrobot_mpc_ws/myrobot_mpc_avoidance/scripts/acados_ocp_fairino_nmpc.json",
+        "json_file": "/home/robot/my-workspace/fairino_robotarm/src/myrobot_mpc_ws/myrobot_mpc_avoidance/scripts/acados_ocp_fairino_nmpc.json",
         "os": "unix",
         "shared_lib_ext": ".so"
     },
@@ -362,7 +362,7 @@
         "fairino_arm_nmpc_cost/fairino_arm_nmpc_cost_ext_cost_e_fun_jac_hess.c",
         "fairino_arm_nmpc_cost/fairino_arm_nmpc_cost_ext_cost_e_fun_jac.c"
     ],
-    "hash": "c8b3e262d89dcff100ea573ed7d16f96",
+    "hash": "5b82dd73017250474a482a5df347dbd0",
     "model": {
         "con_h_expr": "SX((((((((((p_cbfGradQ_0*dq_0)+(p_cbfGradQ_1*dq_1))+(p_cbfGradQ_2*dq_2))+(p_cbfGradQ_3*dq_3))+(p_cbfGradQ_4*dq_4))+(p_cbfGradQ_5*dq_5))+p_cbfVobs)+(p_cbfGamma*p_cbfH))+eps_cbf))",
         "con_h_expr_0": [],

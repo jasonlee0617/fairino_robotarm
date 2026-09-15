@@ -17,8 +17,8 @@ launch:
     # goal_collection：只采集并校验可复用的终点位姿，不调用轨迹规划器。
     # benchmark_execution：执行完整 start -> goal -> start 闭环并记录结果。
     # benchmark_algorithm：先到 start 一次，仅统计规划算法结果，不执行目标轨迹。
-  goal_collection_dir: $HOME/myrobot_matlab/sample_data/sample_data_ros/benchmark_goal_collection
-  benchmark_output_dir: $HOME/myrobot_matlab/sample_data/sample_data_ros/trajectory_plan_benchmark_sample
+  goal_collection_dir: $HOME/my-workspace/myrobot_matlab/sample_data/sample_data_ros/benchmark_goal_collection
+  benchmark_output_dir: $HOME/my-workspace/myrobot_matlab/sample_data/sample_data_ros/trajectory_plan_benchmark_sample
   benchmark_variant: full
   benchmark_goal_root_mode: multi_root
   start_joints: -1.1170,-1.6214,1.5465,-1.5877,-1.6368,0.0

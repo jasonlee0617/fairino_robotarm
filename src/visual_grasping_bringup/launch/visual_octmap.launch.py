@@ -3,7 +3,6 @@
 
 import os
 import sys
-from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -155,7 +154,7 @@ def _launch_setup(context):
         name="handeye_publisher", output="screen", parameters=[{
             "use_sim_time": use_sim_time,
             "calibration_name": "robot_calibration",
-            "storage_directory": str(Path.home() / "fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/real"),
+            "storage_directory": os.path.expandvars("$HOME/my-workspace/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/real"),
         }],
     )
     retime = IncludeLaunchDescription(PythonLaunchDescriptionSource(os.path.join(

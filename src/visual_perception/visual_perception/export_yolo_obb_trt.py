@@ -2,6 +2,7 @@
 """Export a YOLO-OBB .pt model as named ONNX and fixed-shape TensorRT files."""
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -9,8 +10,8 @@ from ultralytics import YOLO
 
 
 # Edit these defaults for repeated exports; command-line options override them.
-DEFAULT_MODEL = "~/fairino_robotarm/src/visual_perception/models/yolo-obb-640.pt"
-DEFAULT_OUTPUT_DIR = "~/fairino_robotarm/src/visual_perception/models"
+DEFAULT_MODEL = "$HOME/my-workspace/fairino_robotarm/src/visual_perception/models/yolo-obb-640.pt"
+DEFAULT_OUTPUT_DIR = "$HOME/my-workspace/fairino_robotarm/src/visual_perception/models"
 DEFAULT_IMGSZ = 640
 DEFAULT_NAME = "yolo-obb-640"  # None creates yolo_obb-{imgsz}.onnx and yolo_obb-{imgsz}.engine.
 DEFAULT_DEVICE = 0
@@ -46,8 +47,8 @@ def move_export(source: Path, destination: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    model_path = Path(args.model).expanduser().resolve()
-    output_dir = Path(args.output_dir).expanduser().resolve()
+    model_path = Path(os.path.expandvars(args.model)).expanduser().resolve()
+    output_dir = Path(os.path.expandvars(args.output_dir)).expanduser().resolve()
     if model_path.suffix != ".pt" or not model_path.is_file():
         raise FileNotFoundError(f"Input model must be an existing .pt file: {model_path}")
     if args.imgsz <= 0:

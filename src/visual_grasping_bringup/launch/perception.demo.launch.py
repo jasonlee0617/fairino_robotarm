@@ -2,7 +2,6 @@
 """真实相机感知与手眼 TF 演示入口."""
 
 import os
-from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -20,7 +19,7 @@ _LAUNCH_ARGUMENT_SPECS = (
     ("calibration_name", "robot_calibration", "手眼标定名称。"),
     (
         "storage_directory",
-        str(Path.home() / "fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/real"),
+        os.path.expandvars("$HOME/my-workspace/fairino_robotarm/src/calibration_ws/hand_eye_calibration/calib/real"),
         "标定结果保存目录。",
     ),
 )

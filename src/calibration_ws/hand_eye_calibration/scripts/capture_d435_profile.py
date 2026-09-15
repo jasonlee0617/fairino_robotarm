@@ -316,10 +316,9 @@ class D435ProfileCapture(Node):
         output = str(self.get_parameter("output_file").value)
         if not output:
             output = str(
-                Path.home()
-                / "fairino_robotarm"
-                / "src"
-                / "camera_ws"
+                Path(os.path.expandvars(
+                    "$HOME/my-workspace/fairino_robotarm/src/camera_ws"
+                ))
                 / "realsense2_gz_description"
                 / "config"
                 / "d435_profiles"
