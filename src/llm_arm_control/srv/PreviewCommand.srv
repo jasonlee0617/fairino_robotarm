@@ -1,8 +1,0 @@
-string session_id
-string instruction
----
-bool accepted
-string status
-string preview_id
-string preview_json
-string message

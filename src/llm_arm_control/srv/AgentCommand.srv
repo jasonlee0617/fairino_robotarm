@@ -1,0 +1,10 @@
+string session_id
+string call_id
+string tool_name
+string arguments_json
+---
+bool accepted
+string status
+string preview_id
+string error_code
+string result_json

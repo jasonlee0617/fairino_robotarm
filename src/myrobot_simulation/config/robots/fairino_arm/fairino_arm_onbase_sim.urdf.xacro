@@ -22,6 +22,7 @@
   <xacro:arg name="camera_depth_v_fov" default="1.0122909661567112"/>
   <xacro:arg name="camera_depth_near_m" default="0.28"/>
   <xacro:arg name="camera_depth_far_m" default="3.0"/>
+  <xacro:arg name="native_depth_enabled" default="true"/>
 
   <xacro:include filename="$(find fairino_arm_moveit_descriptions)/urdf/fairino_arm_moveit_descriptions.urdf"/>
   <xacro:include filename="$(find fairino_arm_moveit_descriptions)/urdf/camera/camera.xacro"/>
@@ -29,7 +30,7 @@
   <xacro:include filename="../common/sim_plugins.xacro"/>
   <xacro:include filename="../common/sim_ros2_control.xacro"/>
 
-  <xacro:macro name="fairino_arm_gazebo_camera" params="camera_fps:=60 camera_image_width:=640 camera_image_height:=480 camera_fx:=0 camera_fy:=0 camera_cx:=0 camera_cy:=0 camera_k1:=0 camera_k2:=0 camera_k3:=0 camera_p1:=0 camera_p2:=0 camera_noise_stddev:=0 camera_h_fov:=1.2042771838760873 camera_v_fov:=0.7330382858376184 camera_depth_image_width:=1280 camera_depth_image_height:=720 camera_depth_fx:=0 camera_depth_fy:=0 camera_depth_cx:=0 camera_depth_cy:=0 camera_depth_k1:=0 camera_depth_k2:=0 camera_depth_k3:=0 camera_depth_p1:=0 camera_depth_p2:=0 camera_depth_h_fov:=1.5184364492350666 camera_depth_v_fov:=1.0122909661567112 camera_depth_near_m:=0.28 camera_depth_far_m:=3.0">
+  <xacro:macro name="fairino_arm_gazebo_camera" params="camera_fps:=60 camera_image_width:=640 camera_image_height:=480 camera_fx:=0 camera_fy:=0 camera_cx:=0 camera_cy:=0 camera_k1:=0 camera_k2:=0 camera_k3:=0 camera_p1:=0 camera_p2:=0 camera_noise_stddev:=0 camera_h_fov:=1.2042771838760873 camera_v_fov:=0.7330382858376184 camera_depth_image_width:=1280 camera_depth_image_height:=720 camera_depth_fx:=0 camera_depth_fy:=0 camera_depth_cx:=0 camera_depth_cy:=0 camera_depth_k1:=0 camera_depth_k2:=0 camera_depth_k3:=0 camera_depth_p1:=0 camera_depth_p2:=0 camera_depth_h_fov:=1.5184364492350666 camera_depth_v_fov:=1.0122909661567112 camera_depth_near_m:=0.28 camera_depth_far_m:=3.0 native_depth_enabled:=true">
     <xacro:property name="PI" value="3.14159274"/>
     <xacro:camera_v0 parent="base_link">
       <origin xyz="0.25 0.7 1.0" rpy="0 ${79*PI/180} ${-PI/2}"/>
@@ -43,7 +44,8 @@
       depth_fx="${camera_depth_fx}" depth_fy="${camera_depth_fy}" depth_cx="${camera_depth_cx}" depth_cy="${camera_depth_cy}"
       depth_k1="${camera_depth_k1}" depth_k2="${camera_depth_k2}" depth_k3="${camera_depth_k3}" depth_p1="${camera_depth_p1}" depth_p2="${camera_depth_p2}"
       depth_h_fov="${camera_depth_h_fov}" depth_v_fov="${camera_depth_v_fov}"
-      depth_near_m="${camera_depth_near_m}" depth_far_m="${camera_depth_far_m}"/>
+      depth_near_m="${camera_depth_near_m}" depth_far_m="${camera_depth_far_m}"
+      native_depth_enabled="${native_depth_enabled}"/>
   </xacro:macro>
 
   <xacro:gz_common_plugins controllers_file="$(arg controllers_file)" enable_sensors="$(arg enable_camera)"/>
@@ -61,7 +63,8 @@
       camera_depth_fx="$(arg camera_depth_fx)" camera_depth_fy="$(arg camera_depth_fy)" camera_depth_cx="$(arg camera_depth_cx)" camera_depth_cy="$(arg camera_depth_cy)"
       camera_depth_k1="$(arg camera_depth_k1)" camera_depth_k2="$(arg camera_depth_k2)" camera_depth_k3="$(arg camera_depth_k3)" camera_depth_p1="$(arg camera_depth_p1)" camera_depth_p2="$(arg camera_depth_p2)"
       camera_depth_h_fov="$(arg camera_depth_h_fov)" camera_depth_v_fov="$(arg camera_depth_v_fov)"
-      camera_depth_near_m="$(arg camera_depth_near_m)" camera_depth_far_m="$(arg camera_depth_far_m)"/>
+      camera_depth_near_m="$(arg camera_depth_near_m)" camera_depth_far_m="$(arg camera_depth_far_m)"
+      native_depth_enabled="$(arg native_depth_enabled)"/>
   </xacro:if>
   <xacro:gz_link_friction link="finger1" mu1="500.0" mu2="500.0" kp="30000" kd="15"/>
   <xacro:gz_link_friction link="finger2" mu1="500.0" mu2="500.0" kp="30000" kd="15"/>

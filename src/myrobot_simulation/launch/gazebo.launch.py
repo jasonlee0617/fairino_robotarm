@@ -45,6 +45,7 @@ _LAUNCH_ARGUMENT_SPECS = (
     ("camera_image_width", "640", "彩色图像宽度。", None),
     ("camera_image_height", "480", "彩色图像高度。", None),
     ("camera_depth_far_m", "3.0", "D435 深度远裁剪距离（米）。", None),
+    ("native_depth_enabled", "true", "是否渲染并桥接原生深度流。", None),
     ("camera_profile", "", "命名 D435 配置；启用相机时需提供配置或文件。", None),
     ("camera_profile_file", "", "外部 D435 配置文件，与 camera_profile 二选一。", None),
     ("camera_noise_mode", "off", "相机噪声模型。", ("off", "d435_empirical")),
@@ -104,6 +105,7 @@ def _launch_setup(context, *args, **kwargs):
         "camera_fps": camera_fps,
         "camera_image_width": LaunchConfiguration("camera_image_width").perform(context),
         "camera_image_height": LaunchConfiguration("camera_image_height").perform(context),
+        "native_depth_enabled": LaunchConfiguration("native_depth_enabled").perform(context),
         **{
             name: LaunchConfiguration(name).perform(context)
             for name in CALIBRATION_BOARD_MOUNT_DEFAULTS
@@ -173,7 +175,10 @@ def _launch_setup(context, *args, **kwargs):
         extra_mappings=extra_mappings,
     )
     if as_bool(LaunchConfiguration("enable_camera_bridge").perform(context)):
-        actions.extend(camera_bridge_nodes(use_sim_time))
+        actions.extend(camera_bridge_nodes(
+            use_sim_time,
+            as_bool(LaunchConfiguration("native_depth_enabled").perform(context)),
+        ))
     if as_bool(LaunchConfiguration("enable_servo").perform(context)):
         kinematics_kdl_config = load_yaml(
             profile.moveit_config_package, profile.kinematics_kdl_file

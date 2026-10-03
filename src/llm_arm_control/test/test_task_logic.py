@@ -1,332 +1,320 @@
-import json
-
 import pytest
 
+from llm_arm_control_nodes.agent_protocol import (
+    AGENT_TOOLS,
+    SYSTEM_PROMPT,
+    agent_tool_definitions,
+    parse_agent_tool_call,
+    protocol_failure_response,
+    scene_response_instructions,
+)
 from llm_arm_control_nodes.task_logic import (
-    ClarificationRequired,
-    DetectionCandidate,
-    SafetyState,
-    TaskPlan,
-    TaskPreview,
-    apply_safety_command,
-    build_semantic_history,
-    complete_safety_reset,
-    deterministic_visual_plan,
-    execution_step_count,
-    instruction_has_visual_intent,
-    parse_llm_plan,
-    preview_status,
-    safety_execution_valid,
-    validate_plan_intent,
-    validate_visual_state,
+    CapabilityInvocation,
+    PreviewFailure,
+    SceneEntity,
+    spoken_error_text,
+    task_plan_for_invocation,
 )
 
 
-CANDIDATES = (
-    DetectionCandidate(0, "elongated_object"),
-    DetectionCandidate(1, "box"),
+def entity(index, class_name, u, v, *, selectable=True, distance=0.2):
+    return SceneEntity(
+        entity_id=f"e{index}",
+        role="destination" if class_name == "box" else "pickable",
+        class_name=class_name,
+        confidence=0.9,
+        image_u=u,
+        image_v=v,
+        image_width=1280.0,
+        image_height=720.0,
+        image_center_distance=((u - 0.5) ** 2 + (v - 0.5) ** 2) ** 0.5,
+        obb_area_px=100.0,
+        depth_m=0.6,
+        depth_quality=0.9,
+        base_x=0.2,
+        base_y=0.3,
+        base_z=0.02,
+        tool_distance=distance,
+        selectable=selectable,
+        unavailable_reason="" if selectable else "VISION_DEPTH_INVALID",
+        frame_stamp=1,
+        result_seq=2,
+        detection_index=index,
+    )
+
+
+SCENE = (
+    entity(0, "elongated_object", 0.20, 0.50, distance=0.4),
+    entity(1, "elongated_object", 0.51, 0.51, distance=0.3),
+    entity(2, "elongated_object", 0.85, 0.45, distance=0.2),
+    entity(3, "cube", 0.30, 0.20, distance=0.5),
+    entity(4, "box", 0.70, 0.80),
 )
 
-SPATIAL_METADATA = (
-    {"index": 0, "class_name": "elongated_object", "center_uv": [10.0, 10.0],
-     "image_size": [100, 100], "base_xyz": [0.1, 0.0, 0.1]},
-    {"index": 1, "class_name": "elongated_object", "center_uv": [90.0, 10.0],
-     "image_size": [100, 100], "base_xyz": [0.5, 0.0, 0.1]},
-    {"index": 2, "class_name": "elongated_object", "center_uv": [10.0, 90.0],
-     "image_size": [100, 100], "base_xyz": [0.9, 0.0, 0.1]},
-    {"index": 3, "class_name": "elongated_object", "center_uv": [90.0, 90.0],
-     "image_size": [100, 100], "base_xyz": [1.3, 0.0, 0.1]},
-    {"index": 4, "class_name": "elongated_object", "center_uv": [50.0, 50.0],
-     "image_size": [100, 100], "base_xyz": [1.7, 0.0, 0.1]},
-    {"index": 5, "class_name": "cube", "center_uv": [50.0, 20.0],
-     "image_size": [100, 100], "base_xyz": [0.2, 0.2, 0.1]},
-    {"index": 6, "class_name": "box", "center_uv": [50.0, 80.0],
-     "image_size": [100, 100], "base_xyz": [0.3, 0.3, 0.1]},
+
+def relative_step(x=0.0, y=0.0, z=0.0, rx=0.0, ry=0.0, rz=0.0):
+    return {
+        "x_m": x, "y_m": y, "z_m": z,
+        "rx_deg": rx, "ry_deg": ry, "rz_deg": rz,
+    }
+
+
+def test_system_prompt_is_shorter_without_losing_safety_contract():
+    assert len(SYSTEM_PROMPT) < 1160
+    for required in (
+        "CURRENT_YOLO_SCENE", "scene_id", "source_entity_ids", "base_link",
+        "0.30m", "60度", "碰撞感知IK", "MoveIt", "不联网", "home",
+    ):
+        assert required in SYSTEM_PROMPT
+
+
+def test_dynamic_scene_and_repair_prompts_are_compact_and_schema_driven():
+    scene_prompt = scene_response_instructions({"scene_id": "scene-1", "entities": []})
+    assert scene_prompt.startswith("CURRENT_YOLO_SCENE=")
+    assert len(scene_prompt) < 120
+
+    value, instructions = protocol_failure_response(
+        "submit_visual_task", "MODEL_RESPONSE_INVALID", "missing scene_id",
+        final=False,
+    )
+    assert value["expected_fields"] == (
+        "operation, scene_id, source_entity_ids, destination_entity_id"
+    )
+    assert "scene_id" in instructions and "按schema重调" in instructions
+
+
+def test_error_speech_uses_explicit_codes():
+    assert spoken_error_text("TARGET_UNREACHABLE").startswith("目标未通过")
+    assert spoken_error_text("PLAN_INVALID").startswith("任务计划未通过")
+    assert "故障代码" in spoken_error_text("UNEXPECTED_CODE")
+
+
+def test_entity_id_selection_compiles_to_local_indices():
+    invocation = CapabilityInvocation(
+        "yolo.pick_place", "scene-1", ("e0", "e1", "e2"), "e4"
+    )
+    plan = task_plan_for_invocation(invocation, SCENE[:3], [SCENE[4]])
+    assert [action["source_index"] for action in plan.actions] == [0, 1, 2]
+    assert all(action["destination_index"] == 4 for action in plan.actions)
+
+
+def test_unavailable_detected_box_preserves_specific_visual_error():
+    unavailable_box = entity(4, "box", 0.7, 0.8, selectable=False)
+    invocation = CapabilityInvocation("yolo.pick_place", "scene-1", ("e0",), "e4")
+
+    with pytest.raises(PreviewFailure) as failure:
+        task_plan_for_invocation(invocation, [SCENE[0]], [unavailable_box])
+
+    assert failure.value.error_code == "VISION_DEPTH_INVALID"
+
+
+@pytest.mark.parametrize(
+    "step,error",
+    (
+        (relative_step(x=0.3001), "0.30"),
+        (relative_step(y=-0.3001), "0.30"),
+        (relative_step(z=0.3001), "0.30"),
+        (relative_step(rx=60.1), "60"),
+        (relative_step(ry=-60.1), "60"),
+        (relative_step(rz=60.1), "60"),
+    ),
 )
+def test_relative_motion_is_bounded_per_axis(step, error):
+    with pytest.raises(ValueError, match=error):
+        parse_agent_tool_call(
+            "move_relative",
+            {"steps": [step]},
+            allowed_tools=("move_relative",),
+        )
 
 
-def plan(actions, candidates=CANDIDATES, **kwargs):
-    return parse_llm_plan(json.dumps({"actions": actions}), candidates, **kwargs)
+def test_relative_motion_supports_combined_six_axis_base_delta():
+    _name, invocation = parse_agent_tool_call(
+        "move_relative",
+        {"steps": [
+            relative_step(0.30, -0.30, 0.30, 60.0, -60.0, 30.0),
+            relative_step(y=0.05),
+        ]},
+        allowed_tools=("move_relative",),
+    )
+    actions = task_plan_for_invocation(invocation).actions
+
+    assert actions[0] == {
+        "type": "move_relative",
+        "dx": 0.30, "dy": -0.30, "dz": 0.30,
+        "droll_deg": 60.0, "dpitch_deg": -60.0, "dyaw_deg": 30.0,
+        "frame_id": "base_link",
+    }
+    assert actions[1]["dy"] == 0.05
+    assert all(item["frame_id"] == "base_link" for item in actions)
 
 
-@pytest.mark.parametrize("value", ["", "[]", '{"actions": []}', '{"actions": [{"type": "unknown"}]}'])
-def test_rejects_invalid_or_empty_plans(value):
+@pytest.mark.parametrize(
+    "step",
+    (
+        relative_step(),
+        relative_step(x=float("nan")),
+        relative_step(rx=float("inf")),
+    ),
+)
+def test_relative_motion_rejects_zero_and_nonfinite_steps(step):
     with pytest.raises(ValueError):
-        parse_llm_plan(value, CANDIDATES)
-
-
-@pytest.mark.parametrize(
-    "action",
-    [
-        {"type": "pick", "source_index": 0},
-        {"type": "place", "destination_index": 1},
-        {"type": "pick_place", "source_index": 0, "destination_index": 1},
-    ],
-)
-def test_validates_visual_actions_and_indices(action):
-    assert plan([action]).actions[0] == action
-    with pytest.raises(ClarificationRequired, match="unavailable"):
-        plan([{"type": "pick_place", "source_index": 9, "destination_index": 1}])
-
-
-def test_only_canonical_visual_classes_are_accepted():
-    aliases_are_not_detector_classes = (
-        DetectionCandidate(0, "bolt"),
-        DetectionCandidate(1, "box"),
-    )
-    with pytest.raises(ValueError, match="not pickable"):
-        plan([{"type": "pick", "source_index": 0}], aliases_are_not_detector_classes)
-
-
-def test_rejects_ambiguous_class_without_local_disambiguation():
-    candidates = CANDIDATES + (DetectionCandidate(2, "elongated_object"),)
-    with pytest.raises(ClarificationRequired, match="ambiguous"):
-        plan([{"type": "pick_place", "source_index": 0, "destination_index": 1}], candidates)
-    assert plan(
-        [{"type": "pick_place", "source_index": 0, "destination_index": 1}],
-        candidates,
-        reject_ambiguous=False,
-    )
-
-
-def test_visual_action_cannot_be_mixed_with_low_level_actions():
-    with pytest.raises(ValueError, match="exactly one"):
-        plan([
-            {"type": "pick", "source_index": 0},
-            {"type": "set_gripper", "state": "close"},
-        ])
-
-
-@pytest.mark.parametrize(
-    ("instruction", "expected_index"),
-    [
-        ("抓取图像左边的 bolt", 0),
-        ("抓取图像右边的 pen", 1),
-        ("抓取图像上面的 bolt", 0),
-        ("抓取图像下面的 bolt", 2),
-        ("抓取图像中间的 pen", 4),
-        ("抓取图像左边的 螺丝", 0),
-        ("抓取距离机械臂最近的 bolt", 0),
-        ("抓取距离机械臂最远的 pen", 4),
-    ],
-)
-def test_deterministic_visual_selection_uses_aliases_and_spatial_words(instruction, expected_index):
-    plan = deterministic_visual_plan(
-        instruction,
-        SPATIAL_METADATA,
-        current_xyz=(0.0, 0.0, 0.0),
-        pick_classes={"elongated_object", "cube", "stone"},
-        place_classes={"box"},
-    )
-
-    assert plan.actions == ({"type": "pick", "source_index": expected_index},)
-
-
-def test_deterministic_visual_selection_creates_pick_place_without_llm():
-    plan = deterministic_visual_plan(
-        "把 cube 放到 box",
-        SPATIAL_METADATA,
-        current_xyz=(0.0, 0.0, 0.0),
-        pick_classes={"elongated_object", "cube", "stone"},
-        place_classes={"box"},
-    )
-
-    assert plan.actions == ({"type": "pick_place", "source_index": 5, "destination_index": 6},)
-
-
-@pytest.mark.parametrize(
-    ("instruction", "expected_index"),
-    [
-        ("抓取图像最上方的物体并放到盒子", 0),
-        ("抓取图像最右侧的目标并放到盒子", 1),
-    ],
-)
-def test_generic_pick_target_creates_pick_place_with_spatial_selection(instruction, expected_index):
-    selected = deterministic_visual_plan(
-        instruction,
-        SPATIAL_METADATA,
-        current_xyz=(0.0, 0.0, 0.0),
-        pick_classes={"elongated_object", "cube", "stone"},
-        place_classes={"box"},
-    )
-
-    assert selected.actions == (
-        {"type": "pick_place", "source_index": expected_index, "destination_index": 6},
-    )
-
-
-def test_generic_pick_target_without_selector_requires_clarification_when_multiple_exist():
-    with pytest.raises(ClarificationRequired, match="multiple pickable object"):
-        deterministic_visual_plan(
-            "抓取物体并放到盒子",
-            SPATIAL_METADATA,
-            current_xyz=(0.0, 0.0, 0.0),
-            pick_classes={"elongated_object", "cube", "stone"},
-            place_classes={"box"},
+        parse_agent_tool_call(
+            "move_relative", {"steps": [step]},
+            allowed_tools=("move_relative",),
         )
 
 
-def test_deterministic_visual_selection_requires_disambiguator_for_multiple_objects():
-    with pytest.raises(ClarificationRequired, match="multiple elongated_object"):
-        deterministic_visual_plan(
-            "抓取 bolt",
-            SPATIAL_METADATA,
-            current_xyz=(0.0, 0.0, 0.0),
-            pick_classes={"elongated_object", "cube", "stone"},
-            place_classes={"box"},
+def test_relative_motion_rejects_old_direction_protocol():
+    with pytest.raises(ValueError, match="unknown fields"):
+        parse_agent_tool_call(
+            "move_relative",
+            {"steps": [{"direction": "left", "distance_m": 0.1}]},
+            allowed_tools=("move_relative",),
         )
 
 
-@pytest.mark.parametrize("instruction", ["抓取 cube", "把 bolt 放到 box", "pick the pen"])
-def test_detects_visual_instruction_before_calling_llm(instruction):
-    assert instruction_has_visual_intent(instruction)
-
-
-def test_home_is_not_a_visual_instruction():
-    assert not instruction_has_visual_intent("回到 home")
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "抓取 bolt",
-        "抓 bolt",
-        "把 cube 放到 box",
-        "把 pen 放 box",
-        "pick the pen",
-        "place it in the box",
-    ],
-)
-def test_visual_intent_cannot_degrade_to_gripper_or_pose_actions(instruction):
-    low_level = plan([{"type": "set_gripper", "state": "open"}], candidates=())
-    with pytest.raises(ValueError, match="must use pick, place, or pick_place"):
-        validate_plan_intent(instruction, low_level)
-
-
-def test_visual_intent_guard_accepts_visual_action():
-    validate_plan_intent("抓取 bolt", plan([{"type": "pick", "source_index": 0}]))
-
-
-@pytest.mark.parametrize("action_type", ["pick", "pick_place"])
-def test_pick_requires_empty_gripper_state(action_type):
-    validate_visual_state(action_type, holding=False, recovery=False)
-    with pytest.raises(ValueError, match="already holding"):
-        validate_visual_state(action_type, holding=True, recovery=False)
-
-
-def test_place_allows_empty_gripper_and_blocks_during_recovery():
-    validate_visual_state("place", holding=True, recovery=False)
-    validate_visual_state("place", holding=False, recovery=False)
-    with pytest.raises(ValueError, match="recovery"):
-        validate_visual_state("place", holding=True, recovery=True)
-
-
-def test_pick_and_place_instruction_rejects_a_place_only_plan():
-    with pytest.raises(ValueError, match="pick_place"):
-        validate_plan_intent(
-            "抓取图像上方的物体并放到盒子",
-            TaskPlan(({"type": "place", "destination_index": 0},)),
+def test_tool_allowlist_and_schema_are_enforced_locally():
+    definitions = agent_tool_definitions(("set_gripper", "ask_user"))
+    assert [item["function"]["name"] for item in definitions] == ["set_gripper", "ask_user"]
+    with pytest.raises(ValueError, match="not allowed"):
+        parse_agent_tool_call("set_gripper", {"state": "open"}, allowed_tools=("ask_user",))
+    with pytest.raises(ValueError, match="unknown fields: extra"):
+        parse_agent_tool_call(
+            "set_gripper", {"state": "open", "extra": 1},
+            allowed_tools=("set_gripper",),
         )
 
 
-def test_relative_limits_and_default_frame():
-    result = plan([{"type": "move_relative", "dx": 0.03, "dy": 0.04}], candidates=())
-    assert result.actions[0]["frame_id"] == "base_link"
-    with pytest.raises(ValueError, match="translation"):
-        plan([{"type": "move_relative", "dx": 0.051}], candidates=())
-    with pytest.raises(ValueError, match="rotation"):
-        plan([{"type": "move_relative", "dyaw_deg": 15.1}], candidates=())
+def test_shallow_gripper_and_visual_tools_compile_to_existing_domain_types():
+    name, gripper = parse_agent_tool_call(
+        "set_gripper", {"state": "close"}, allowed_tools=("set_gripper",)
+    )
+    assert name == "commit_task"
+    assert task_plan_for_invocation(gripper).actions == (
+        {"type": "set_gripper", "state": "close"},
+    )
 
-
-def test_absolute_pose_requires_unit_quaternion():
-    assert plan([
-        {"type": "move_absolute", "x": 0.2, "y": 0.3, "z": 0.2,
-         "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
-    ], candidates=())
-    with pytest.raises(ValueError, match="normalized"):
-        plan([
-            {"type": "move_absolute", "x": 0.2, "y": 0.3, "z": 0.2,
-             "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 2.0}
-        ], candidates=())
-
-
-@pytest.mark.parametrize("action_type", ["move_relative", "move_absolute"])
-def test_motion_frames_are_strictly_base_link(action_type):
-    if action_type == "move_relative":
-        action = {"type": action_type, "dx": 0.01, "frame_id": "tool0"}
-    else:
-        action = {
-            "type": action_type,
-            "x": 0.2,
-            "y": 0.3,
-            "z": 0.2,
-            "qx": 0.0,
-            "qy": 0.0,
-            "qz": 0.0,
-            "qw": 1.0,
-            "frame_id": "tool0",
-        }
-    with pytest.raises(ValueError, match="base_link"):
-        plan([action], candidates=())
-
-
-def test_preview_expires_at_boundary():
-    preview = TaskPreview("id", plan([{"type": "home"}], candidates=()), 10.0, 15.0)
-    assert preview_status(preview, 25.0) == "ready"
-    assert preview_status(preview, 25.001) == "expired"
-
-
-def test_safety_epoch_permanently_invalidates_old_execution():
-    state = SafetyState()
-    assert safety_execution_valid(state, 0)
-
-    stopped = apply_safety_command(state, "stop")
-    assert stopped.blocked
-    assert not safety_execution_valid(stopped, 0)
-    resumed = apply_safety_command(stopped, "resume")
-    assert safety_execution_valid(resumed, 1)
-    assert not safety_execution_valid(resumed, 0)
-
-    resetting = apply_safety_command(resumed, "reset")
-    reset_complete = complete_safety_reset(resetting)
-    assert safety_execution_valid(reset_complete, 2)
-    assert not safety_execution_valid(reset_complete, 1)
-
-
-def test_feedback_step_count_matches_complete_execution_chain():
-    actions = [
-        {"type": "pick"},
-        {"type": "place"},
-        {"type": "pick_place"},
-        {"type": "set_gripper"},
-    ]
-    assert execution_step_count(actions) == 6 + 4 + 10 + 1
-
-
-def test_language_history_excludes_frame_specific_detection_atoms():
-    parsed = plan([
-        {"type": "pick_place", "source_index": 0, "destination_index": 1},
-    ])
-    history = build_semantic_history("抓取 bolt，然后放到 box", parsed, CANDIDATES)
-    assert history[0] == {"role": "user", "content": "抓取 bolt，然后放到 box"}
-    assistant = history[1]["content"]
-    assert "source_class" in assistant
-    assert "destination_class" in assistant
-    assert all(atom not in assistant for atom in ("index", "center", "base_xyz", "coordinates"))
+    name, visual = parse_agent_tool_call(
+        "submit_visual_task",
+        {
+            "operation": "pick_place",
+            "scene_id": "scene-1",
+            "source_entity_ids": ["e0", "e1"],
+            "destination_entity_id": "e4",
+        },
+        allowed_tools=("submit_visual_task",),
+    )
+    assert name == "commit_task"
+    assert visual.skill == "yolo.pick_place"
+    assert visual.source_entity_ids == ("e0", "e1")
 
 
 @pytest.mark.parametrize(
-    ("action", "semantic_field"),
-    [
-        ({"type": "pick", "source_index": 0}, "source_class"),
-        ({"type": "place", "destination_index": 1}, "destination_class"),
-    ],
+    ("operation", "source", "destination"),
+    (
+        ("pick", ["e0"], ""),
+        ("place", [], "e4"),
+        ("pick_place", ["e0"], "e4"),
+    ),
 )
-def test_standalone_visual_history_is_semantic(action, semantic_field):
-    history = build_semantic_history("instruction", plan([action]), CANDIDATES)
-    assert semantic_field in history[1]["content"]
+def test_visual_operation_requires_the_matching_branch_groups(
+    operation, source, destination,
+):
+    _name, invocation = parse_agent_tool_call(
+        "submit_visual_task",
+        {
+            "operation": operation,
+            "scene_id": "scene-1", "source_entity_ids": source,
+            "destination_entity_id": destination,
+        },
+        allowed_tools=("submit_visual_task",),
+    )
+    assert invocation.skill == "yolo." + operation
 
 
-def test_clarification_history_contains_no_llm_detection_selection():
-    history = build_semantic_history("抓取 bolt")
-    assert json.loads(history[1]["content"]) == {"status": "clarification_required"}
+def test_multi_target_pick_requires_destination():
+    with pytest.raises(PreviewFailure) as failure:
+        parse_agent_tool_call(
+            "submit_visual_task",
+            {
+                "operation": "pick", "scene_id": "scene-1",
+                "source_entity_ids": ["e0", "e1"], "destination_entity_id": "",
+            },
+            allowed_tools=("submit_visual_task",),
+        )
+    assert failure.value.error_code == "DESTINATION_REQUIRED"
+
+
+def test_old_queries_visual_protocol_is_rejected():
+    with pytest.raises(ValueError, match="unknown fields: queries"):
+        parse_agent_tool_call(
+            "submit_visual_task",
+            {"operation": "pick", "queries": []},
+            allowed_tools=("submit_visual_task",),
+        )
+
+    with pytest.raises(ValueError, match="unknown fields"):
+        parse_agent_tool_call(
+            "submit_visual_task",
+            {
+                "operation": "pick",
+                "source_branches": [], "destination_branches": [],
+            },
+            allowed_tools=("submit_visual_task",),
+        )
+
+
+def test_single_source_id_string_is_safely_normalized():
+    _name, invocation = parse_agent_tool_call(
+        "submit_visual_task",
+        {
+            "operation": "pick", "scene_id": "scene-1",
+            "source_entity_ids": "e0", "destination_entity_id": "",
+        },
+        allowed_tools=("submit_visual_task",),
+    )
+    assert invocation.source_entity_ids == ("e0",)
+
+    for invalid in ("", "e0,e1", "e0 e1", {}, 7):
+        with pytest.raises(ValueError, match="source_entity_ids"):
+            parse_agent_tool_call(
+                "submit_visual_task",
+                {
+                    "operation": "pick", "scene_id": "scene-1",
+                    "source_entity_ids": invalid, "destination_entity_id": "",
+                },
+                allowed_tools=("submit_visual_task",),
+            )
+
+
+def test_inspect_scene_boolean_is_strict():
+    with pytest.raises(ValueError, match="must be a boolean"):
+        parse_agent_tool_call(
+            "inspect_scene", {"include_rgb": "false"},
+            allowed_tools=("inspect_scene",),
+        )
+
+
+def test_capability_catalog_is_yolo_only_for_visual_tasks():
+    schemas = agent_tool_definitions(("submit_visual_task", "set_gripper"))
+    serialized = str(schemas)
+    assert "graspnet.best_grasp" not in serialized
+    assert "system.switch_mode" not in serialized
+    assert "anyOf" not in serialized
+    submit = schemas[0]["function"]["parameters"]
+    assert submit["additionalProperties"] is False
+    assert submit["properties"]["operation"]["enum"] == ["pick", "pick_place", "place"]
+    assert submit["properties"]["source_entity_ids"]["uniqueItems"] is True
+    assert "mode" not in submit["properties"]
+
+
+def test_shallow_tool_catalog_is_less_than_half_the_old_size():
+    import json
+
+    encoded = json.dumps(agent_tool_definitions(AGENT_TOOLS), ensure_ascii=False)
+    assert len(encoded) < 8304
+    assert '"queries"' not in encoded
+    assert '"source_branches"' not in encoded
+    assert '"destination_branches"' not in encoded
+    assert encoded.count('"source_entity_ids"') == 2

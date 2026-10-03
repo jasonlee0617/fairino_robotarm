@@ -1,0 +1,10 @@
+sherpa_onnx_version: 1.13.8
+models:
+  kws:
+    name: sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
+    url: https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2
+    directory: sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
+    sha256: 68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6
+    archive_size: 32885699
+    license_status: model_specific_license_not_published
+    license_url: https://github.com/k2-fsa/sherpa-onnx/issues/3852

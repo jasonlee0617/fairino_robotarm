@@ -1,558 +1,155 @@
-# Fairino 机器人臂 ROS2 工作区架构说明
-
-[项目总入口](../../README.md) · [演示视频录制与发布指南](演示视频录制与发布指南.md)
-
-## 概述
-
-本工作区是一个基于 **ROS2 Humble** + **MoveIt2** 的 **Fairino S622 六轴机器人臂** 综合控制系统，集成了运动规划、视觉感知、LLM 任务推理、Gazebo 仿真、手眼标定等完整功能链路。
-
-- **构建系统**: ament_cmake / ament_python (colcon)
-- **核心框架**: ROS2 Humble, MoveIt2, ros2_control
-- **仿真引擎**: Gazebo (Ignition/Fortress)
-- **控制方式**: 位置/速度控制 (joint_trajectory_controller)
-- **机器人型号**: Fairino3_v6 / Fairino5_v6 (6-DOF)，支持气爪(Gripper)
-
----
-
-## 包分层架构 (8 层)
-
-### 第 0 层 — 硬件接口层
-
-#### [fairino_msgs](../../myrobot_support_ws/fairino_msgs/) — 自定义 ROS2 消息/服务接口
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (rosidl) |
-| 语言 | C (IDL) |
-
-**自定义接口：**
-- `RemoteCmdInterface.srv` — 字符串命令服务接口，将 ROS 服务调用翻译为 Fairino SDK 的 `movej()`/`movel()` 等字符串指令
-- `RemoteScriptContent.srv` — 逐行脚本执行服务
-- `RobotNonrtState.msg` — 103 字段的完整机器人状态消息（关节位置/力矩、笛卡尔位姿、法兰位姿、数字 IO、错误码、报警、夹爪状态等）
-
----
-
-#### [fairino_hardware](../../myrobot_support_ws/fairino_hardware/) — 硬件驱动与命令服务器
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake |
-| 语言 | C++ |
-| 关键依赖 | rclcpp, hardware_interface, pluginlib, rclcpp_lifecycle, fairino_msgs |
-| 厂商 SDK | libfairino.so v2.2.5 |
-
-**可执行文件：**
-- `ros2_cmd_server` — 命令服务器，将 `RemoteCmdInterface` 服务调用翻译为 Fairino SDK 调用，支持中英文错误消息
-- `fairino_hardware` (共享库) — ros2_control `SystemInterface` 插件，通过 SDK 读取关节位置/力矩，将控制命令写入机器人控制器，包含夹爪 I/O 控制(DO0 电磁阀)
-
-**功能：** 为 ros2_control 框架提供硬件抽象，让 `joint_trajectory_controller` 等上层控制器通过标准接口驱动机器人。同时提供 `ros2_cmd_server` 直接发送 Fairino 字符串命令的备用通道。
-
----
-
-### 第 1 层 — 机器人模型层
-
-#### [fairino_description](../../myrobot_support_ws/fairino_description/) — Fairino3_v6 机器人描述 (URDF)
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake |
-| 文件 | URDF/xacro、mesh 文件 |
-
-**功能：** 提供 fairino3_v6 / fairino5_v6 机器人的几何模型、运动学链、视觉模型的 URDF/xacro 文件。
-
----
-
-#### [fairino_arm_moveit_descriptions](../../myrobot_support_ws/fairino_arm_moveit_descriptions/) — Fairino Arm (含夹爪) 机器人描述
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake |
-| 文件 | URDF/xacro、SRDF、mesh 文件 |
-
-**功能：** 提供带夹爪版本的 Fairino 机器人描述文件，是整个仿真和抓取系统中使用的主要机器人模型。
-
----
-
-#### [fairino3_v6_moveit2_config](../../myrobot_support_ws/fairino3_v6_moveit2_config/) — Fairino3_v6 MoveIt2 配置
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (MoveIt Setup Assistant 自动生成) |
-| 包含 | SRDF, kinematics.yaml, joint_limits.yaml, controllers.yaml, OMPL 规划配置, RViz 配置 |
-
-**功能：** 标准 MoveIt2 运动规划配置包（MoveGroup 参数、运动学求解器、控制器、规划流水线）。
-
----
-
-#### [fairino_arm_moveit_config](../../myrobot_support_ws/fairino_arm_moveit_config/) — Fairino Arm MoveIt2 配置
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (MoveIt Setup Assistant 自动生成) |
-
-**功能：** 带夹爪版的 MoveIt2 配置包，是整个工作区的主力配置（`myrobot_simulation`、`hand_eye_calibration`、视觉抓取等全部引用此配置）。
-
----
-
-### 第 2 层 — 运动规划层
-
-#### [myrobot_planning_core](../../myrobot_planning_core/) — 纯 C++ 规划核心库
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (共享库 libmyrobot_planning_core.so) |
-| 语言 | C++17 |
-| 外部依赖 | **仅 Eigen3** (ROS 无关的纯算法库) |
-
-**核心算法：**
-| 算法 | 说明 |
-|------|------|
-| BiRRT* | 双向渐进最优 RRT |
-| AAPF-BiRRT* | 人工势场引导采样的 BiRRT* |
-| RRT* | 标准渐进最优 RRT |
-
-**关键模块：**
-- `dh_kinematics.cpp` — DH 参数正逆运动学
-- `ik/fairino_ik.cpp` — Fairino 专用解析 IK 求解器
-- `tree/rrt_tree.cpp` — nanoflann KD 树 (高效最近邻查询)
-- `aapf/aapf_guided_sampler.cpp` — 基于全连杆最近障碍梯度的关节空间引导
-- `aapf/aapf_adaptive_sampler_selector.h` — Guided/Global 双源代价感知调度
-- `trajectory/path_shortcut.cpp` — 路径缩短优化
-- `trajectory/trajectory_smoother.cpp` — 轨迹平滑
-- `constraints/orientation_checker.cpp` — 末端姿态约束检查
-
-**功能：** ROS 无关的纯 C++17 规划库，为 Fairino 6-DOF 机械臂实现多种基于采样的运动规划算法，导出 `PlannerEngine` 接口供上层调用。
-
----
-
-#### [myrobot_planning_ros](../../myrobot_planning_ros/) — MoveIt2 规划器集成
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake |
-| 语言 | C++ |
-| 关键依赖 | myrobot_planning_core, moveit_core, moveit_ros_planning, pluginlib |
-
-**可执行文件：**
-- `standalone_planner` — 独立规划节点，通过 Action/Service 接受 MotionPlanRequest
-- `fairino_cartesian_path_server` — 笛卡尔路径规划服务节点
-- `myrobot_planning_ros` (共享库) — MoveIt2 PlannerManager 插件
-
-**MoveIt2 插件注册：** `plugins/myrobot_planning_plugins.xml` 注册自研规划器为 MoveIt2 可选规划器
-
-**功能：** 将 `myrobot_planning_core` 中的纯算法库桥接到 MoveIt2 框架中，包括 PlannerManager 插件、IK 求解器插件、独立规划节点。
-
----
-
-#### [trajectory_retime_server](../../myrobot_common_ws/trajectory_retime_server/) — 轨迹时间重新参数化
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (含 rosidl 接口) |
-| 语言 | C++ |
-| 依赖 | moveit_core, moveit_ros_planning |
-
-**自定义服务：** `RetimeTrajectory.srv` — 输入 JointTrajectory + group_name + 速度/加速度缩放 -> 输出重定时的 JointTrajectory
-
-**功能：** 使用 MoveIt 的 **TOTG (Time-Optimal Trajectory Generation)** 算法对轨迹进行时间重新参数化，确保满足关节速度/加速度限制的前提下以最快速度执行。
-
----
-
-#### [pymoveit2](../../myrobot_common_ws/pymoveit2/) — Python MoveIt2 客户端库
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (含 Python 代码) |
-| 语言 | Python |
-| 版本 | 4.0.0 |
-| 作者 | Andrej Orsula |
-
-**核心类：**
-- `MoveIt2` — 核心类，封装 MoveIt2 Action 接口 (move_to_joints, move_to_pose, plan, execute, servo)
-- `MoveIt2Gripper` — 夹爪开/关控制
-- `MoveIt2Servo` — 伺服控制
-
-**功能：** 整个工作区所有 Python 运动控制的基础库，所有上层包（视觉抓取、伺服、LLM 控制、标定）均通过 `pymoveit2.MoveIt2` 控制机器人运动。
-
----
-
-#### [myrobot_common](../../myrobot_common_ws/myrobot_common/) — 通用机器人通用能力库
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_python |
-| 语言 | Python |
-
-**核心模块：**
-| 模块 | 功能 |
-|------|------|
-| `planning/motion_executor.py` | **MoveItMotion** — 高层运动执行封装：多IK插件(Fairino/KDL)支持、基于评分的路径选择(`select_best_path`)、禁入区(keepout zone)管理、夹爪控制、规划器切换、急停集成 |
-| `planning/trajectory_scoring.py` | 加权腕关节评分路径选择 |
-| `planning/keepout_manager.py` | 规划场景禁入区管理 |
-| `perception/detection_cache.py` | 目标检测缓存与时序跟踪 |
-| `perception/target_selector.py` | 按目标类型优先级选择最新检测结果 |
-| `task/abort_manager.py` | 急停与运动取消处理 |
-| `utils/pose_tools.py` | 位姿工具 (PoseStamped构建、偏移、旋转) |
-| `utils/tf_tools.py` | TF坐标变换工具 (camera->base坐标系变换) |
-
-**功能：** 为 visual_servo_bringup, visual_grasping_bringup, hand_eye_calibration, llm_arm_control 等包提供共享基础能力，避免代码重复。
-
----
-
-### 第 3 层 — 高级规划层
-
-#### [myrobot_mpc_avoidance](../../myrobot_mpc_ws/myrobot_mpc_avoidance/) — MPC 动态避障
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake |
-| 语言 | C++ / Python |
-| 核心求解器 | **acados** (外部 MPC/NMPC 优化库) |
-| 许可 | BSD-3-Clause |
-| 维护者 | JasonLee |
-
-**可执行文件：**
-- `mpc_avoidance_node` (C++) — 主 MPC 避障运行时节点
-- `obstacle_simulator` (C++) — 障碍物仿真工具
-- `myrobot_mpc_avoidance_plugin` (共享库) — MoveIt2 MPC 规划器插件
-- `mpc_avoidance_node_sim.py` (Python) — 仿真演示脚本
-
-**核心模块：**
-| 模块 | 功能 |
-|------|------|
-| `mpc_solver.cpp` / `nmpc_solver.cpp` | MPC/NMPC 求解器包装 (acados) |
-| `solver_selector.cpp` | 根据场景选择 MPC 或 NMPC |
-| `obstacle_tracker.cpp` | 动态障碍物跟踪 |
-| `obstacle_distance_ops.cpp` | 机器人连杆-障碍物距离计算 |
-| `smooth_box_distance.cpp` | 平滑符号距离 (盒状障碍物) |
-| `arc_path_follower.cpp` | 弧长路径跟随 |
-| `robot_kinematics.cpp` | 用于代价计算的机器人运动学 |
-| `control/control_coordinator.cpp` | 顶层控制协调器 |
-| `control/deadlock_replan_engine.cpp` | 死锁检测与重规划 |
-| `control/command_pipeline.cpp` | 机器人执行命令管线 |
-| `control/scene_obstacle_provider.cpp` | 场景障碍物信息提供者 |
-| `plugin/mpc_planner_manager.cpp` | MoveIt2 PlannerManager 插件 |
-
-**功能：** 整个工作区最复杂的包。使用 acados 优化库实现**模型预测控制(MPC)实时动态避障**：
-1. 在每个时间步求解最优控制问题，在跟踪参考路径的同时避开动态障碍物
-2. 通过 Gazebo ignition-transport 直接通信或 ROS 话题跟踪障碍物
-3. 支持作为独立节点运行或作为 MoveIt2 规划器插件集成
-4. 包含死锁检测、路径跟随、可视化等功能
-
----
-
-### 第 4 层 — 感知层
-
-#### [visual_perception](../../visual_perception/) — 统一 YOLO 感知包
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (含 Python 代码 + rosidl 接口) |
-| 语言 | Python |
-| 模型 | YOLOv8 (Ultralytics) |
-
-**可执行文件/入口点：**
-| 节点 | 功能 |
-|------|------|
-| `yolo_detector.py` | 标准 YOLOv8 检测 (轴对齐边界框)。发布 vision_msgs/Detection2DArray + 3D位置 + 可视化图像 |
-| `yolo_detector_obb.py` | **YOLOv8 OBB (旋转边界框)** 检测。使用深度估计从 OBB 掩码区域计算 3D 中心 + yaw 偏航角。支持细长物体/盒子/方块多类别检测 |
-| `yolo_kalman_detector_obb.py` | Kalman 滤波 OBB 追踪，增加时序平滑以提高检测稳定性 |
-| `semantic_octomap_cloud_filter.py` | 语义点云过滤：从点云中去除已检测到的目标物体，避免 MoveIt 将其视为障碍物 |
-| `export_yolo_obb_trt.py` | 导出 YOLO OBB 模型为 TensorRT 格式以加速 GPU 推理 |
-
-**工具模块：**
-- `obb_geometry.py` — OBB 几何运算 (角度操作、角点提取、yaw 归一化)
-- `depth_estimation.py` — 鲁棒 3D 中心估计 (MAD 异常值剔除)
-- `visualization.py` — 检测中心可视化
-
-**自定义消息：** `Yolov8Inference`, `InferenceResult`, `ObbDebug`, `TrackDebug`
-
-**功能：** 核心感知包，是整个抓取/伺服/LLM 系统的"眼睛"。提供 YOLOv8 多种检测模式，特别是 OBB(旋转边界框)检测是视觉抓取和 LLM 任务规划的主要感知来源。
-
----
-
-#### [graspnet_bringup](../../graspnet_ws/graspnet_bringup/) — GraspNet 6-DOF 抓取检测
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_python |
-| 语言 | Python |
-| 模型 | GraspNet-baseline (深度学习) |
-
-**入口点：**
-- `graspnet_inference` — 从 RGB-D 图像生成 6-DOF 抓取候选（位置+姿态+分数+夹爪宽度），发布 PoseArray
-- `graspnet_visual_grasping` — 使用 GraspNet 候选执行完整抓取管线
-
-**功能：** 集成 GraspNet-baseline 深度学习模型，直接从点云生成 6-DOF 抓取姿态候选，与 YOLO 检测形成互补的感知模态。
-
----
-
-### 第 5 层 — 任务执行层 (抓取与操作)
-
-#### [visual_grasping_bringup](../../visual_grasping_bringup/) — YOLO 视觉抓取执行
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_python |
-| 语言 | Python |
-
-**入口点：**
-- `visual_grasping` — **VisualGraspingNode**：完整视觉抓取管线，使用 DetectionCache + TargetSelector + MoveItMotion + 状态机
-- `dynamic_collision_objects` — 从 YOLO 检测结果发布 MoveIt CollisionObject，使检测到的物体在规划场景中变为碰撞障碍物
-
-**功能：** 视觉抓取执行层。接收 YOLO OBB 检测，选择目标，通过 MoveIt2 规划抓取轨迹，使用状态机驱动抓取全流程（接近→下降→抓取→提升→放置）。同时管理动态碰撞物体。
-
----
-
-#### [visual_servo_bringup](../../visual_servo_bringup/) — 视觉伺服抓取
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_python |
-| 语言 | Python |
-
-**入口点：**
-- `visual_position_servo` — 基于 YOLO OBB 的闭环位置伺服装夹抓取
-
-**控制器算法：**
-- **PID** — 比例-积分-微分控制
-- **MPC** — 模型预测控制
-- **LADRC** — 线性自抗扰控制
-- **NLADRC** — 非线性自抗扰控制
-
-**核心模块：**
-- `ServoController` — 主伺服控制循环 (检测误差计算→速度指令发布)
-- `TargetEstimator` — 从目标检测估计期望抓取位姿
-- `CommandLimiter` — 速度/位置安全限幅
-- `GraspStateMachine` — 抓取状态机 (接近→下降→抓取→提升→放置)
-
-**功能：** 闭环视觉伺服抓取，不同于一次性规划执行(开环)，实时根据 YOLO OBB 检测反馈连续调整末端位姿，提供更强的鲁棒性。
-
----
-
-### 第 6 层 — 高层智能层
-
-#### [llm_arm_control](../../llm_arm_control/) — LLM 任务规划与执行
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (含 Python 代码) |
-| 语言 | Python |
-| LLM | DeepSeek API |
-
-**入口点：**
-- `robot_pose_control_server` — 姿态控制服务，接受 LLM 规划的位姿目标，通过 MoveItMotion 执行
-- `robot_pose_monitor_node` — 机器人位姿监控与 TF 变换
-- `llm_control_task_server` — **核心任务服务器**：集成 DeepSeek LLM + YOLO RGB-D 检测 + Fairino 控制
-- `llm_control_cli` — CLI 客户端
-
-**工作流程：**
-1. 用户发出自然语言指令 (如"把红色盒子放到桌子上")
-2. 捕获当前场景的 YOLO OBB 检测结果
-3. 构建包含场景上下文和用户指令的 prompt 发送给 DeepSeek
-4. 解析 LLM 返回的任务计划 (拾取/放置动作序列)
-5. 验证计划安全性和意图与视觉状态的一致性
-6. 发布预览命令供用户确认
-7. 通过 `robot_pose_control_server` 执行
-
-**自定义接口：** `ControlPose.srv`, `PreviewCommand.srv`, `ExecutePreview.action`
-
-**功能：** 实现 LLM 驱动的机器人操作。用户用自然语言描述任务，系统自动理解场景、规划动作序列并执行。
-
----
-
-### 第 7 层 — 仿真与集成层
-
-#### [myrobot_simulation](../../myrobot_simulation/) — 仿真启动与编排
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (含 Python) |
-| 语言 | Python |
-
-**仿真场景 Launch 文件：**
-| 文件 | 场景 |
-|------|------|
-| `gazebo.launch.py` | 主仿真 (含机器人模型、MoveIt2、控制器、相机桥接、伺服) |
-| `visual_grasping_sim.launch.py` | Sim 视觉抓取 |
-| `graspnet_grasping_sim.launch.py` | Sim GraspNet 抓取 |
-| `visual_position_servo_sim.launch.py` | 位置伺服仿真 |
-| `calibration_sim.launch.py` | 标定仿真 |
-| `motion_planning_demo_sim.launch.py` | `interactive` 终端路径规划/Fairino-KDL IK 对比；`goal_collection` 采集目标集；`benchmark` 使用全局 `start_pose` 的 IK 起点自动规划统计与结构化归档 |
-| `llm_robot_control_sim.launch.py` | LLM + YOLO 终端确认控制仿真 |
-
-**演示节点：**
-- `pick_drop_node_sim.py` — 仿真拾放运动演示
-- `target_motion_controller_node.py` — 通用目标键盘控制器（圆形/矩形轨迹）
-- `motion_planning_node_sim.py` — 交互路径规划与 Fairino/KDL IK 对比；统一解析、校验并执行 Cartesian `start_pose`
-
-**模块化启动工具：** `launch_utils/` 目录包含 `sim_stack.py`, `moveit_stack.py`, `perception_stack.py`, `robot_profiles.py`, `controllers.py`, `launch_parsing.py` 等可组合的启动模块。
-
-**功能：** 仿真编排中枢。提供模块化启动基础设施和预构建的启动文件，覆盖全部仿真场景。
-
----
-
-#### [camera_ws](../../camera_ws/) — 相机源码归类目录（非 ROS 包）
-
-目录包含相机相关子包：
-- **depthai-ros** — Luxonis OAK-D 深度相机 ROS2 驱动
-- **realsense-ros** — Intel RealSense 相机 ROS2 驱动
-- **realsense2_gz_description** — RealSense 相机 Gazebo 仿真模型 (URDF/xacro + ros_gz_bridge)
-
----
-
-#### [realsense2_gz_description](../../camera_ws/realsense2_gz_description/) — RealSense Gazebo 仿真描述
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake |
-| 支持型号 | D415/D435/D455 |
-
-**功能：** 提供 Gazebo 中仿真的 RealSense 相机 xacro 文件，通过 `ros_gz_bridge` 将 RGB-D 数据(彩色图、深度图、点云)桥接到 ROS2 主题。
-
----
-
-### 第 8 层 — 标定层
-
-#### [calibration_ws](../../calibration_ws/) — 标定源码归类目录（非 ROS 包）
-
-目录包含标定相关子包：hand_eye_calibration, easy_handeye2 (第三方), ros2_aruco (第三方)。
-
----
-
-#### [hand_eye_calibration](../../calibration_ws/hand_eye_calibration/) — 手眼标定
-
-**操作说明：** [手眼标定文档说明](手眼标定/手眼标定文档说明.md)
-
-| 属性 | 值 |
-|------|-----|
-| 构建类型 | ament_cmake (含 Python) |
-| 语言 | Python |
-| 作者 | Yifei Cheng |
-
-**两种标定模式：**
-- **Eye-on-Base** (眼在基座)：相机固定，ArUco 标记在末端执行器上
-- **Eye-in-Hand** (眼在手)：相机在末端执行器上，ArUco 标记固定在环境中
-
-**可执行文件：**
-| 脚本 | 功能 |
-|------|------|
-| `auto_calibration_collector.py` | **全自动标定样本采集器**：控制机器人移动到候选位姿，使用 ArUco 图像级检测进行质量把关，记录末端+标记位姿样本，验证样本覆盖度(XY/Z/旋转跨度) |
-| `calibration_aruco_publisher.py` | ArUco 标记 TF 发布 (ros2_aruco 检测→TF树) |
-| `evaluate_calibration.py` | 标定精度评估 (RMSE 平移+旋转误差) |
-| `follow_aruco_marker.py` | 低频全局 MoveIt 跟随 ArUco 标记 |
-| `handeye_publisher.py` | 手眼标定结果 TF 发布 |
-| `visualize_aruco_marker.py` | ArUco 标记 RViz 可视化 |
-
-**第三方依赖（vendored）：**
-- **easy_handeye2** — 手眼标定求解器 (采样、AX=XB 求解、保存/加载标定)
-- **ros2_aruco** — ArUco 标记检测 ROS2 包
-
-**功能：** 完整手眼标定流水线，实现相机与机器人基座之间变换关系的自动标定。
-
----
-
-## 数据流与依赖关系图
-
-```
-                        ┌──────────────────────────┐
-                        │     用户自然语言指令       │
-                        └─────────────┬────────────┘
-                                      │
-                        ┌─────────────▼────────────┐
-                        │   llm_arm_control         │
-                        │   (DeepSeek LLM 任务解析)  │
-                        └─────────────┬────────────┘
-                                      │ 解析为位姿序列
-                    ┌─────────────────┼─────────────────┐
-                    │                 ▼                  │
-                    │  ┌──────────────────────────┐     │
-                    │  │  myrobot_common           │     │
-                    │  │  (MoveItMotion 运动执行)   │     │
-                    │  └─────────────┬────────────┘     │
-                    │                │                    │
-        ┌───────────┼────────────────┼────────────┐      │
-        │           │                │            │      │
-        ▼           ▼                ▼            ▼      │
-┌──────────┐ ┌────────────┐ ┌──────────────┐ ┌──────────┐
-│ pymoveit2│ │trajectory_ │ │fairino_      │ │fairino_  │
-│(Python   │ │retime_     │ │planning_ros  │ │mpc_      │
-│ MoveIt2  │ │server      │ │(BiRRT*/RRT*) │ │avoidance │
-│ 客户端)  │ │(TOTG重定时) │ │              │ │(MPC避障) │
-└─────┬────┘ └─────┬──────┘ └──────┬───────┘ └────┬─────┘
-      │            │               │               │
-      └────────────┼───────────────┼───────────────┘
-                   │               │
-                   ▼               ▼
-          ┌──────────────────────────────┐
-          │       MoveIt2 框架            │
-          │  (MoveGroup / PlanningScene)  │
-          └──────────────┬───────────────┘
-                         │
-          ┌──────────────▼───────────────┐
-          │    ros2_control               │
-          │    (joint_trajectory_controller│
-          └──────────────┬───────────────┘
-                         │
-          ┌──────────────▼───────────────┐
-          │    fairino_hardware           │
-          │    (SystemInterface / libfairino.so)
-          └──────────────┬───────────────┘
-                         │
-          ┌──────────────▼───────────────┐
-          │    Fairino S622 机器人实体/仿真 │
-          └──────────────────────────────┘
-
-
-感知链路:
-┌───────────┐    ┌──────────────┐    ┌────────────────────┐
-│ Realsense │───▶│visual_perception│───▶│ visual_grasping_bringup    │
-│ / OAK-D   │    │ (YOLOv8 OBB) │    │ / visual_servo_bringup     │
-│ 相机      │    └──────┬───────┘    │ / llm_arm_control   │
-└───────────┘           │            └────────────────────┘
-                        │
-               ┌────────▼────────┐
-               │graspnet_bringup│
-               │(GraspNet 6-DOF) │
-               └─────────────────┘
+# Fairino ROS 2 技术文档中心
+
+[返回项目首页](../../README.md)
+
+这里是 Fairino 机械臂工作区的统一技术入口。第一次接触项目时，先按阅读路线建立整体认识，再进入具体功能；不要从某个节点文件反推整套系统。
+
+> [!NOTE]
+> 文档中的“静态检查”“测试通过”“Gazebo 验证”“云端连接”和“真实机械臂验证”是不同等级的证据。每篇专题只说明实际完成的验证，不自动外推到其他运行环境。
+
+## 快速阅读路线
+
+1. 阅读本页的架构与包职责。
+2. 使用[仿真环境架构](simulation-and-planning/仿真环境架构说明.md)理解 Gazebo、MoveIt、控制器、相机和业务 Launch 的关系。
+3. 按目标进入专题：
+   - 规划与 IK：[规划 Demo](simulation-and-planning/planning-demo.md) → [规划器架构](simulation-and-planning/规划器架构说明.md) → [规划算法](simulation-and-planning/规划算法结构说明.md)
+   - 感知与操作：[YOLO 视觉抓取](perception-and-grasping/yolov8-visual-grasping.md)或[GraspNet 抓取](perception-and-grasping/graspnet-simulation.md)
+   - 闭环控制：[位置视觉伺服](simulation-and-planning/visual-servo-simulation.md)
+   - 自然语言控制：[实时语音 LLM 控制](perception-and-grasping/llm-yolo-control.md)
+   - 标定：[手眼标定](手眼标定/手眼标定文档说明.md)与[标定故障排查](手眼标定/标定程序问题排查.md)
+   - 动态避障：[MPC/NMPC](simulation-and-planning/mpc动态避障.md)
+4. 先完成静态配置和仿真检查，再进入真实相机或真实机械臂流程。
+
+## 系统全貌
+
+```mermaid
+flowchart TD
+    User[用户指令或任务目标] --> App[业务入口]
+    Camera[RGB-D 相机] --> Perception[visual_perception]
+    Perception --> App
+
+    subgraph Apps[任务层]
+      LLM[llm_arm_control]
+      Grasp[visual_grasping_bringup]
+      Servo[visual_servo_bringup]
+      GraspNet[graspnet_bringup]
+      Sim[myrobot_simulation]
+    end
+
+    App --> Apps
+    Apps --> Common[myrobot_common / pymoveit2]
+    Common --> MoveIt[MoveIt 2]
+    Planner[myrobot_planning_ros] --> MoveIt
+    Core[myrobot_planning_core] --> Planner
+    MPC[myrobot_mpc_avoidance] --> MoveIt
+    MoveIt --> Control[ros2_control / trajectory controller]
+    Control --> SimRobot[Gazebo]
+    Control --> Hardware[fairino_hardware]
+    Hardware --> Arm[Fairino 机械臂]
 ```
 
----
+系统遵循三条边界：
 
-## 关键技术栈总结
+- 视觉和 LLM 只提供目标语义或受限任务，不直接产生可绕过本地检查的关节命令；
+- MoveIt、规划器、轨迹重定时和控制器负责运动可达性、碰撞与执行；
+- 软件取消和状态机锁存不是安全等级急停，真实设备必须依赖独立硬件安全链路。
 
-| 类别 | 技术 |
-|------|------|
-| **通信框架** | ROS2 Humble (rclcpp, rclpy, Action/Service/Topic) |
-| **运动规划** | MoveIt2 (MoveGroup, PlanningScene, ros2_control) |
-| **规划算法** | BiRRT*, AAPF-BiRRT*, MIRE-BiAIT*, RRT* (自研 C++17) |
-| **轨迹优化** | TOTG 时间最优轨迹生成, 路径缩短, B样条平滑 |
-| **避障算法** | MPC/NMPC (acados 求解器), 动态障碍物跟踪 |
-| **视觉检测** | YOLOv8 (标准框/OBB旋转框), Kalman 滤波跟踪 |
-| **抓取检测** | GraspNet-baseline (6-DOF 深度学习点云抓取) |
-| **伺服控制** | PID, MPC, LADRC, NLADRC |
-| **AI推理** | DeepSeek LLM (自然语言→任务计划) |
-| **视觉编程** | NodeGraphQt (可视化节点图工作流) |
-| **仿真** | Gazebo (Ignition/Fortress), ros_gz_bridge |
-| **机器人模型** | URDF/xacro, SRDF, MoveIt Setup Assistant |
-| **硬件通信** | libfairino.so v2.2.5 (厂商 SDK) |
-| **摄像机** | Intel RealSense, Luxonis OAK-D |
-| **标定** | 手眼标定 (AX=XB), ArUco 标记 |
-| **数值计算** | Eigen3, nanoflann, NumPy, SciPy, transforms3d |
+## 工作区目录与职责
 
----
+### 机器人支持与硬件
 
-## 文件统计
+| 包 | 职责 |
+| --- | --- |
+| [fairino_msgs](../myrobot_support_ws/fairino_msgs/) | Fairino 自定义 Message/Service 接口 |
+| [fairino_hardware](../myrobot_support_ws/fairino_hardware/) | ros2_control 硬件插件和字符串命令服务 |
+| [fairino_description](../myrobot_support_ws/fairino_description/) | Fairino3/Fairino5 URDF、xacro 与 mesh |
+| [fairino_arm_moveit_descriptions](../myrobot_support_ws/fairino_arm_moveit_descriptions/) | 带夹爪和相机的机器人描述 |
+| [fairino3_v6_moveit2_config](../myrobot_support_ws/fairino3_v6_moveit2_config/) | Fairino3_v6 MoveIt 配置 |
+| [fairino_arm_moveit_config](../myrobot_support_ws/fairino_arm_moveit_config/) | 当前抓取、伺服和 LLM 主链使用的 MoveIt 配置 |
 
-| 统计项 | 数量 |
-|--------|------|
-| ROS2 功能包 | 18 个 |
-| 元包 (metapackage) | 4 个 |
-| Vendored 第三方包 | 4 个 (easy_handeye2, ros2_aruco, depthai-ros, realsense-ros) |
-| C++ 共享库 | 4 个 (myrobot_planning_core, myrobot_planning_ros, fairino_hardware, myrobot_mpc_avoidance) |
-| C++ 可执行文件 | 8+ 个 |
-| Python 可执行文件/入口点 | 20+ 个 |
-| Python 共享模块 (非入口点) | 30+ 个 |
-| Launch 文件 | 30+ 个 |
-| 自定义 ROS 接口 | 5 个 Service, 6 个 Message, 1 个 Action |
-| 机器人模型 | 2 个 (fairino3_v6, fairino_arm) |
+### 规划与公共执行
+
+| 包 | 职责 |
+| --- | --- |
+| [myrobot_planning_core](../myrobot_planning_core/) | ROS 无关的采样规划、解析 IK、碰撞与轨迹后处理 |
+| [myrobot_planning_ros](../myrobot_planning_ros/) | MoveIt PlannerManager、IK 插件与独立规划接口 |
+| [myrobot_common](../myrobot_common_ws/myrobot_common/) | MoveItMotion、目标缓存、TF、位姿、安全取消等公共能力 |
+| [pymoveit2](../myrobot_common_ws/pymoveit2/) | Python MoveIt 2 Action/Service 客户端 |
+| [trajectory_retime_server](../myrobot_common_ws/trajectory_retime_server/) | 基于 MoveIt TOTG 的轨迹重新参数化 |
+| [myrobot_mpc_avoidance](../myrobot_mpc_ws/myrobot_mpc_avoidance/) | acados MPC/NMPC 动态避障、轨迹跟踪和重规划通知 |
+
+### 感知、抓取与伺服
+
+| 包 | 职责 |
+| --- | --- |
+| [visual_perception](../visual_perception/) | YOLO/YOLO-OBB、RGB-D 三维估计、跟踪与语义点云过滤 |
+| [visual_grasping_bringup](../visual_grasping_bringup/) | 离散 YOLO 抓放状态机与实机入口 |
+| [visual_servo_bringup](../visual_servo_bringup/) | 图像伺服、位置伺服及 PID/MPC/LADRC/NLADRC 控制器 |
+| [graspnet_bringup](../graspnet_ws/graspnet_bringup/) | GraspNet 推理服务、抓取候选和执行状态机 |
+| [graspnet_source](../graspnet_ws/graspnet_source/) | GraspNet 上游源码与非商业许可边界 |
+
+### LLM、仿真与标定
+
+| 包 | 职责 |
+| --- | --- |
+| [llm_arm_control](../llm_arm_control/) | 本地 KWS、Qwen Realtime、工具协议、Preview 与安全执行 |
+| [myrobot_simulation](../myrobot_simulation/) | Gazebo、MoveIt、控制器、相机、场景和业务 Launch 编排 |
+| [realsense2_gz_description](../camera_ws/realsense2_gz_description/) | RealSense D435 Gazebo 描述与硬件相机 profile |
+| [hand_eye_calibration](../calibration_ws/hand_eye_calibration/) | 自动/半自动手眼标定、结果评估和 TF 发布 |
+
+`camera_ws` 和 `calibration_ws` 还包含 RealSense、DepthAI、Easy Handeye2 与 ros2_aruco 等上游代码。阅读或修改这些目录前，应先确认对应上游许可证和本地改动边界。
+
+## 主要运行入口
+
+| 目的 | 命令 |
+| --- | --- |
+| 基础 Gazebo/MoveIt | `ros2 launch myrobot_simulation gazebo.launch.py` |
+| 规划与 IK 对比 | `ros2 launch myrobot_simulation motion_planning_demo_sim.launch.py` |
+| YOLO 视觉抓取仿真 | `ros2 launch myrobot_simulation visual_grasping_sim.launch.py` |
+| GraspNet 抓取仿真 | `ros2 launch myrobot_simulation graspnet_grasping_sim.launch.py` |
+| 位置视觉伺服仿真 | `ros2 launch myrobot_simulation visual_position_servo_sim.launch.py` |
+| MPC 动态避障仿真 | `ros2 launch myrobot_simulation mpc_avoidance_demo_sim.launch.py` |
+| LLM 实时语音控制仿真 | `ros2 launch myrobot_simulation llm_robot_control_sim.launch.py` |
+| 自动手眼标定仿真 | `ros2 launch myrobot_simulation calibration_sim.launch.py` |
+| LLM 真实机械臂入口 | `ros2 launch llm_arm_control llm_robot_control.launch.py` |
+| YOLO 真实机械臂抓取 | `ros2 launch visual_grasping_bringup visual_grasping.launch.py` |
+
+运行前统一执行：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+命令能够解析只证明 Launch 接口和安装树可见；视觉模型、云端凭据、相机、控制器与机械臂仍需各自检查。
+
+## 专题文档
+
+### 仿真与规划
+
+- [仿真环境架构](simulation-and-planning/仿真环境架构说明.md)
+- [规划 Demo 与基准测试](simulation-and-planning/planning-demo.md)
+- [规划器 ROS/MoveIt 架构](simulation-and-planning/规划器架构说明.md)
+- [自定义 RRT 规划算法](simulation-and-planning/规划算法结构说明.md)
+- [位置视觉伺服](simulation-and-planning/visual-servo-simulation.md)
+- [MPC 动态避障](simulation-and-planning/mpc动态避障.md)
+- [相机模型渲染排查](simulation-and-planning/相机模型渲染问题解决.md)
+
+### 感知、抓取与智能控制
+
+- [YOLO RGB-D 视觉抓取](perception-and-grasping/yolov8-visual-grasping.md)
+- [GraspNet 抓取仿真](perception-and-grasping/graspnet-simulation.md)
+- [实时语音、YOLO 与 MoveIt 智能体](perception-and-grasping/llm-yolo-control.md)
+
+### 标定
+
+- [手眼标定操作说明](手眼标定/手眼标定文档说明.md)
+- [ROS Python 标定节点段错误排查](手眼标定/标定程序问题排查.md)
+
+## 证据与维护约定
+
+- 文档中的包名、文件名、Topic、Service、Action、Launch 参数和默认值应以当前源码为准。
+- 已删除实现只在解释兼容边界时出现，不能继续作为操作入口。
+- 命令示例使用仓库相对路径、`$HOME` 或当前工作区，不记录个人绝对路径。
+- 新增功能时同时更新根 README、本文档入口和对应专题；不要复制一份会独立漂移的数据流说明。
+- 仿真通过不能代替实机安全验收；真实机械臂结果必须明确标注硬件、环境和安全条件。

@@ -47,7 +47,7 @@
 		</link> -->
 	</xacro:macro>
 	<!-- =========================================================宏 2：Gazebo 中的相机传感器 / 材质========================================================= -->
-	<xacro:macro name="camera_gazebo_v0" params="sensor_type:=rgbd fps:=60 image_width:=640 image_height:=480 fx:=0 fy:=0 cx:=0 cy:=0 k1:=0 k2:=0 k3:=0 p1:=0 p2:=0 noise_stddev:=0 h_fov:=1.2042771838760873 v_fov:=0.7330382858376184 depth_image_width:=1280 depth_image_height:=720 depth_fx:=0 depth_fy:=0 depth_cx:=0 depth_cy:=0 depth_k1:=0 depth_k2:=0 depth_k3:=0 depth_p1:=0 depth_p2:=0 depth_h_fov:=1.5184364492350666 depth_v_fov:=1.0122909661567112 depth_near_m:=0.28 depth_far_m:=3.0">
+	<xacro:macro name="camera_gazebo_v0" params="sensor_type:=rgbd fps:=60 image_width:=640 image_height:=480 fx:=0 fy:=0 cx:=0 cy:=0 k1:=0 k2:=0 k3:=0 p1:=0 p2:=0 noise_stddev:=0 h_fov:=1.2042771838760873 v_fov:=0.7330382858376184 depth_image_width:=1280 depth_image_height:=720 depth_fx:=0 depth_fy:=0 depth_cx:=0 depth_cy:=0 depth_k1:=0 depth_k2:=0 depth_k3:=0 depth_p1:=0 depth_p2:=0 depth_h_fov:=1.5184364492350666 depth_v_fov:=1.0122909661567112 depth_near_m:=0.28 depth_far_m:=3.0 native_depth_enabled:=true">
         <!-- Gazebo 侧 D435 相机 -->
         <xacro:gazebo_d435
             name="camera"
@@ -65,7 +65,8 @@
             depth_fx="${depth_fx}" depth_fy="${depth_fy}" depth_cx="${depth_cx}" depth_cy="${depth_cy}"
             depth_k1="${depth_k1}" depth_k2="${depth_k2}" depth_k3="${depth_k3}" depth_p1="${depth_p1}" depth_p2="${depth_p2}"
             depth_h_fov="${depth_h_fov}" depth_v_fov="${depth_v_fov}"
-            depth_near_m="${depth_near_m}" depth_far_m="${depth_far_m}"/>
+            depth_near_m="${depth_near_m}" depth_far_m="${depth_far_m}"
+            native_depth_enabled="${native_depth_enabled}"/>
 
         <!-- camera_link 材质：使用 URDF visual 自带的材质，不强制覆盖 -->
     </xacro:macro>

@@ -81,3 +81,8 @@ weights/
 *.safetensors
 *.blob
 src/GraphExecuter/graph_executer/res/api/llm.json
+
+# Versioned runtime inference assets used by Fairino packages.
+!src/llm_arm_control/model/**/*.onnx
+!src/visual_perception/models/*.pt
+!src/visual_perception/models/*.onnx

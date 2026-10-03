@@ -1,4 +1,6 @@
-# graspnet_grasping_sim.launch.py 说明文档
+# GraspNet 抓取仿真
+
+[返回技术文档中心](../README.md)
 
 本文档说明 `myrobot_simulation/launch/graspnet_grasping_sim.launch.py` 的用途、启动前准备、启动命令、运行链路、验收方法和常见问题。该 launch 面向 Sim 下的 Fairino Arm 机械臂 GraspNet 视觉抓取，目标是完成最小闭环：
 
@@ -290,8 +292,8 @@ Preview Grasp plan score=0.1322 frame=base_link
 ## 5. 数据流
 
 ```text
-gazebo_yolo.launch.py
-  -> camera_bridge_nodes()
+graspnet_grasping_sim.launch.py
+  -> 包含 gazebo.launch.py 并启用 camera bridge
   -> /camera/camera/color/image_raw
   -> /camera/camera/aligned_depth_to_color/image_raw
   -> /camera/camera/aligned_depth_to_color/camera_info
@@ -437,8 +439,8 @@ ros2 run tf2_ros tf2_echo base_link camera_color_optical_frame
 cd $HOME/my-workspace/fairino_robotarm/src
 python3 -m py_compile \
   myrobot_simulation/launch/graspnet_grasping_sim.launch.py \
-  graspnet_bringup/graspnet_bringup/graspnet_inference_node.py \
-  graspnet_bringup/graspnet_bringup/graspnetl_grasping_node.py
+  graspnet_ws/graspnet_bringup/graspnet_bringup/graspnet_inference_node.py \
+  graspnet_ws/graspnet_bringup/graspnet_bringup/graspnetl_grasping_node.py
 git diff --check
 ```
 

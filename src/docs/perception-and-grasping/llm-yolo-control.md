@@ -1,766 +1,558 @@
-# LLM-YOLO-Control 工作原理
+# 实时语音、YOLO RGB-D 与 MoveIt 机械臂智能体
 
-## 概述
+[返回技术文档中心](../README.md)
 
-LLM-YOLO-Control 是一个将**大语言模型（DeepSeek）**与**YOLO 视觉检测**结合、实现**自然语言驱动机器人操作**的系统。用户用自然语言描述任务（如"把红色螺丝刀放到左边的盒子里"），系统自动理解场景、规划动作序列并执行。
+本文面向第一次接触本项目的开发者，解释系统为什么这样设计、数据如何流动、如何完成本地配置，以及怎样安全地启动仿真或实机。
 
-**核心思路：LLM 不做视觉理解，而是做结构化数据的数值推理。**
+## 1. 系统解决什么问题
 
----
+用户可以先说唤醒词，再用自然语言发出命令，例如：
 
-## 系统架构
+> 小鹏同学，把桌面上的三个螺栓从左到右放进盒子。
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                       用户自然语言指令                             │
-│                  "抓取最左边的螺丝钉放到盒子里"                      │
-└─────────────────────────────┬────────────────────────────────────┘
-                              │
-┌─────────────────────────────▼────────────────────────────────────┐
-│                    LlmControlTaskServer                           │
-│                  (llm_control_task_server.py)                      │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌─────────────┐   ┌─────────────────┐   ┌───────────────────┐  │
-│  │ 视觉感知层   │   │   LLM 推理层     │   │   运动执行层       │  │
-│  │             │   │                 │   │                   │  │
-│  │ YOLO OBB   │   │ DeepSeek API    │   │ MoveIt2 +        │  │
-│  │ + 深度估计  │──▶│ chat/completions│──▶│ fairino_planning │  │
-│  │ + TF变换   │   │                 │   │ _core (BiRRT*)    │  │
-│  │             │   │ 文本指令→JSON   │   │                   │  │
-│  └─────────────┘   └─────────────────┘   └───────────────────┘  │
-│                                                                  │
-│  输入: RGB图 + 深度图         输出: 机器人关节轨迹 → 硬件执行       │
-└──────────────────────────────────────────────────────────────────┘
-```
+系统会依次完成：
 
----
+1. 本地KWS检测唤醒词；
+2. 将唤醒后的麦克风音频发送给实时语音模型；
+3. 模型理解语言并从当前YOLO场景中选择实体ID；
+4. 本地任务服务器验证模型参数并创建Preview；
+5. 执行前重新读取RGB-D、TF和当前检测结果；
+6. MoveIt完成IK、碰撞检查、规划和执行；
+7. 实时语音模型播报结果。
 
-## 第一阶段：视觉感知（从像素到 3D 世界坐标）
+大模型不是运动控制器。它不能生成关节轨迹、绝对抓取位姿、安全复位或急停指令。它只负责理解自然语言、选择结构化场景中的实体，并调用经过限制的工具。
 
-### 1.1 数据来源
+键盘控制仍然保留：
 
-| 话题 | 来源包 | 内容 |
-|------|--------|------|
-| `/yolo/detected_result` | `visual_perception/llm_visual_perception.py` | YOLOv8 OBB 检测结果：class_name, confidence, 4 角点像素坐标 (u,v) |
-| `/yolo/detected_result/depth` | `llm_visual_perception.py` | 对齐的深度图像 (16UC1 或 32FC1) |
-| `/camera/.../camera_info` | 相机驱动 | 内参矩阵 K (fx, fy, cx, cy) |
+- `Space`：停止；
+- `h`：复位；
+- `r`：只解除软件锁存。
 
-### 1.2 RGB-D 时间同步
+这些键盘功能也不是安全等级急停。真实生产设备必须使用硬件急停、安全继电器或驱动器STO。
 
-YOLO 帧和深度帧可能不是同一时刻采集的，因此需要配对：
+## 2. 总体架构
 
-```
-YOLO 帧缓冲区 (最多 20 帧)  ──┐
-                             ├── 遍历所有 YOLO×Depth 组合
-深度帧缓冲区 (最多 20 帧)  ──┘   找时间戳差 < 50ms 的最新的一对
-                                        │
-                                        ▼
-                                  active_frame (配对后的帧)
+```mermaid
+flowchart LR
+    Mic[麦克风 16 kHz PCM] --> Capture[audio_capture]
+    Capture --> KWS[Sherpa-ONNX KWS]
+    KWS -->|wake_event| Voice[voice_realtime_node]
+    Capture -->|唤醒后才放行| Voice
+
+    Voice --> Session[RealtimeSessionState]
+    Voice --> Qwen[QwenRealtimeProvider传输边界]
+    Qwen <--> Cloud[Qwen3.8 Omni Realtime]
+
+    Camera[RGB-D相机] --> YOLO[llm_visual_perception]
+    YOLO --> RGBD[任务侧RGB-D解析与TF]
+    Voice -->|AgentCommand| Task[llm_control_task_server]
+    Task --> RGBD
+    Task --> Preview[本地Preview与安全校验]
+    Preview -->|ExecutePreview| MoveIt[MoveIt规划与执行]
+    MoveIt --> Arm[仿真或真实机械臂]
 ```
 
-如果超过 1 秒没有新鲜配对帧，认为视觉输入不可用。
+各模块只负责一件核心工作：
 
-### 1.3 从 2D 像素到 3D 基座坐标（关键步骤）
+| 模块 | 主要职责 | 不负责 |
+|---|---|---|
+| `voice_wake_node` | 本地唤醒词检测 | 命令理解、机械臂动作 |
+| `QwenRealtimeProvider` | Qwen连接、音频和事件格式转换 | 任务安全、视觉坐标 |
+| `RealtimeSessionState` | 轮次、单飞回答、取消、重连和超时 | ROS、网络和音频播放 |
+| `voice_realtime_node` | ROS协调、播音、工具桥接 | Qwen原始协议细节 |
+| `agent_protocol` | 工具Schema、系统提示词和模型参数校验 | Preview和运动执行 |
+| `llm_visual_perception` | 持续YOLO推理和诊断发布 | 最终执行位姿许可 |
+| 任务侧RGB-D解析 | 深度、TF、候选位姿和当前帧安全解析 | 自然语言理解 |
+| `task_logic` | 任务数据、计划、安全状态、Preview生命周期和确定性反馈 | 模型协议 |
+| `llm_control_task_server` | 场景、Preview、幂等和执行权限 | 云模型连接 |
+| MoveIt | IK、碰撞检查、规划和轨迹执行 | 目标语义选择 |
 
-对 YOLO 检测到的每个物体，执行以下变换链：
+## 3. 两种本地模型与云端模型
 
-```
-步骤 1: 从 OBB 四个角点提取中心像素坐标
-        center_uv = mean(points[0:4])
+### 3.1 KWS是什么
 
-步骤 2: 鲁棒深度估计 (robust_center3d_from_obb_depth)
-        - 在 OBB 多边形区域内采样深度值（最多 5000 个点）
-        - 使用 MAD (Median Absolute Deviation) 剔除异常值
-        - 要求深度内点率 ≥ 60%
-        - 输出: 相机坐标系下的 3D 位置 (x_c, y_c, z_c)
-                                        │
-步骤 3: 计算物体 yaw（偏航角）
-        - 取 OBB 的最长边作为主轴方向
-        - 将主轴方向投影到 3D 空间
-        - 通过 TF 变换到 base_link 坐标系
-        - yaw = atan2(dy, dx)，归一化到 [-π/2, π/2]
-                                        │
-步骤 4: TF 坐标变换 (camera_frame → base_link)
-        - 对步骤 2 的 (x_c, y_c, z_c) 做 TF 变换
-        - 输出: base_link 坐标系下的 3D 位置 (x_b, y_b, z_b)
-                                        │
-步骤 5: 组装 ResolvedCandidate
-        {
-          index: 0,
-          class_name: "elongated_object",
-          confidence: 0.92,
-          center_uv: (320, 240),     ← 像素坐标，用于"左/右"推理
-          base_xyz: (0.35, -0.12, 0.05), ← 基座坐标，用于"近/远"推理
-          yaw: 0.23,                 ← 偏航角，用于确定夹取方向
-          depth_inlier_ratio: 0.85   ← 深度质量指标
-        }
+KWS是Keyword Spotting，即关键词检测。它一直在本机监听低成本的音频流，只判断是否出现了“小鹏同学”“小鹏小鹏”或“Hi Robot”。
+
+模型随`llm_arm_control`包安装，源码目录为：
+
+```text
+src/llm_arm_control/model/kws/
+├── encoder.onnx
+├── decoder.onnx
+├── joiner.onnx
+├── tokens.txt
+├── keywords.txt
+├── keywords_raw.txt
+└── en.phone
 ```
 
-**为什么需要两套坐标？**
-- `center_uv`（像素坐标）：LLM 用来推理 **左/右** 位置关系
-- `base_xyz`（基座坐标）：LLM 用来推理 **远/近** 距离关系、系统用来计算运动位姿
+构建安装后对应`share/llm_arm_control/model/kws`。源码模型目录中都是普通文件，
+不存在外层`kws`链接、版本目录或ONNX短名链接；使用`--symlink-install`时，
+安装树可以由colcon链接回这些源码普通文件。Launch不提供模型路径覆盖，
+因此源码运行与安装后运行解析同一份包资源。
 
----
+运行时使用的主要文件：
 
-## 第二阶段：LLM 推理（从自然语言到结构化任务计划）
+| 文件 | 初学者理解 |
+|---|---|
+| `encoder.onnx` | 从连续音频中提取语音特征 |
+| `decoder.onnx` | 根据已有识别状态计算下一步表示 |
+| `joiner.onnx` | 合并编码器与解码器结果，得到token概率 |
+| `tokens.txt` | token编号与符号的对应表 |
+| `en.phone` | 英文关键词生成所需的音素词典 |
+| `keywords_raw.txt` | 人可读的唤醒词定义 |
+| `keywords.txt` | Sherpa-ONNX实际加载的token化关键词 |
 
-### 2.1 LLM 的角色定位
+KWS不负责理解“把螺栓放入盒子”。它只负责打开一次语音会话。这样可以保证未唤醒时不会持续上传麦克风音频。
 
-**LLM 不是视觉模型，不理解图像。** 它是一个文本→JSON 翻译器，接收包含精确数值的结构化上下文，输出结构化的动作序列 JSON。
+模型来自Sherpa-ONNX的中英文KWS模型。模型结构和关键词生成方式可参考[官方KWS说明](https://k2-fsa.github.io/sherpa/onnx/kws/index.html)。仓库锁文件中的`license_status`仍标记为模型专用许可证未公开，部署到产品前应单独完成许可证核验。
 
-这是整个系统最核心的设计理念：
+### 3.2 Qwen Realtime是什么
 
-> 让 LLM 做它擅长的事（数值比较和逻辑推理），让视觉模块做它擅长的事（从像素中提取结构化信息），两者通过精心设计的 JSON 接口连接。
+当前云端实现为：
 
-### 2.2 指令预处理
-
-```python
-# 步骤 1: 判断是否有视觉意图
-instruction_has_visual_intent(instruction)
-# 正则匹配: 抓|夹取|拿|拾取|放|摆放|pick|grasp|place|put
-# 有视觉意图 → 等待最新检测帧 + 3D 位姿（超时 15 秒）
-# 无视觉意图 → 使用缓存元数据（如纯移动指令 "向左移动 5cm"）
-
-# 步骤 2: 本地确定性选择视觉目标
-# bolt/螺栓/螺丝/pen/笔 → elongated_object；左/右/上/下/中间/最近/最远
-# 有明确筛选词 → 直接选择；同类多目标且无筛选词 → 请求澄清
-
-# 步骤 3: 检查是否有消歧词
-_has_disambiguator(instruction)
-# 关键词列表: 左,右,前,后,上,下,最近,最远,靠近,第,编号,索引
-#              left,right,front,back,nearest,farthest,index,number
-# 有消歧词 → reject_ambiguous=False (允许同类物体选一个)
-# 无消歧词 → reject_ambiguous=True  (同类多个则要求用户澄清)
+```yaml
+realtime_provider: qwen
+model: qwen3.8-omni-flash-realtime
+voice: Tina
 ```
 
-### 2.3 构建 LLM 上下文
+它同时承担：
 
-将视觉感知结果 + 用户指令 + 机器人状态打包为一个 JSON：
+- 16 kHz单声道S16LE语音输入；
+- 输入语音转写；
+- 自然语言理解和连续对话；
+- Function Calling；
+- 24 kHz单声道S16LE流式语音输出。
 
-```json
-{
-  "instruction": "抓取最左边的螺丝钉",
-  "candidates": [
-    {
-      "index": 0,
-      "class_name": "elongated_object",
-      "confidence": 0.92,
-      "center_uv": [120, 245],
-      "base_xyz": [0.25, -0.10, 0.05],
-      "yaw": 0.12,
-      "depth_inlier_ratio": 0.85
-    },
-    {
-      "index": 1,
-      "class_name": "elongated_object",
-      "confidence": 0.88,
-      "center_uv": [310, 250],
-      "base_xyz": [0.35, -0.08, 0.05],
-      "yaw": 0.18,
-      "depth_inlier_ratio": 0.91
-    },
-    {
-      "index": 2,
-      "class_name": "elongated_object",
-      "confidence": 0.95,
-      "center_uv": [520, 242],
-      "base_xyz": [0.45, -0.11, 0.04],
-      "yaw": -0.05,
-      "depth_inlier_ratio": 0.88
-    },
-    {
-      "index": 3,
-      "class_name": "box",
-      "confidence": 0.90,
-      "center_uv": [400, 300],
-      "base_xyz": [0.40, 0.20, 0.03],
-      "yaw": -0.15,
-      "depth_inlier_ratio": 0.93
-    }
-  ],
-  "holding_class": null,
-  "current_pose": {
-    "frame_id": "base_link",
-    "x": 0.30, "y": 0.0, "z": 0.50,
-    "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0
-  }
-}
+系统使用`semantic_vad`，默认尾静音为700 ms。服务端自动创建回答和自动打断均关闭，回答的创建、取消和排队由本地状态机控制。Qwen的官方Python SDK、音频格式和Realtime会话参数见[Qwen Omni Realtime Python SDK文档](https://www.alibabacloud.com/help/en/model-studio/omni-realtime-python-sdk)。
+
+Function Calling只能说明模型可以尝试生成工具名和参数，不能证明参数一定符合Schema。Realtime和多模态模型也不能依赖严格结构化输出。因此本项目始终在本地重新解析和校验，相关限制见[Function Calling文档](https://help.aliyun.com/zh/model-studio/qwen-function-calling)和[结构化输出文档](https://help.aliyun.com/zh/model-studio/qwen-structured-output)。
+
+### 3.3 为什么Qwen协议要有独立传输边界
+
+`voice_realtime_node`不再直接处理DashScope事件名。内部统一接口包含：
+
+```text
+connect
+send_audio
+create_response
+cancel_response
+send_tool_result
+send_image
+close
 ```
 
-### 2.4 系统提示词（System Prompt）设计
+Qwen原始事件会先转换成统一事件，例如：
 
-System Prompt 是整个系统的核心，它精确规定了 LLM 的输出格式和推理规则：
-
-```python
-SYSTEM_PROMPT = """你通过一个经过严格验证的本地规划器来控制 Fairino 机械臂。
-请仅返回 JSON 格式，且必须包含且仅包含一个顶层键：{"actions": [...]}。
-允许的动作对象如下：
-1. {"type":"pick","source_index":int}
-2. {"type":"place","destination_index":int}
-3. {"type":"pick_place","source_index":int,"destination_index":int}
-4. {"type":"move_relative","dx":m,"dy":m,"dz":m,...}
-5. {"type":"move_absolute","x":m,"y":m,"z":m,"qx","qy","qz","qw",...}
-6. {"type":"set_gripper","state":"open|close"}
-7. {"type":"home"}
-
-视觉类别 elongated_object 包含语言别名 pen 和 bolt。
-
-当请求抓取但未指定目标位置时，使用 pick；
-当已持有物体并请求放置时，使用 place；
-当同时指定了源位置和目标位置时，使用 pick_place。
-
-绝不能用 set_gripper、move_relative 或 move_absolute 来替代视觉抓取/放置请求。
-
-只能使用已列出的检测索引，严禁捏造视觉坐标。
-如果请求存在歧义，不要猜测：请返回一个包含无效索引的动作，以便本地验证器将其拒绝。
-
-候选目标的 center_uv 单位为图像像素：最左侧的 u 值最小，最右侧的 u 值最大。
-候选目标的 base_xyz 基于 base_link 坐标系。对于最近/最远的请求，请比较从 base_xyz 到 current_pose 的欧几里得距离。
-
-对于视觉任务，必须且只能返回一个 pick、place 或 pick_place 动作。
-只有当 holding_class 不为 null 时，place 动作才有效。
-
-最多返回八个动作。"""
+```text
+session.updated                              → session_ready
+input_audio_buffer.speech_started            → speech_started
+conversation...transcription.completed       → transcription_completed
+response.audio.delta                         → audio_delta
+response.function_call_arguments.done        → tool_call
+response.done                                → response_done
 ```
 
-**System Prompt 的设计要点：**
+这样，DashScope SDK细节不会进入ROS协调、YOLO、Preview或MoveIt层。当前只有一个Qwen实现，因此没有额外的单实现Provider接口或插件框架；未知`realtime_provider`仍会直接启动失败，不会偷偷回退。
 
-| 设计原则 | 具体体现 |
-|----------|----------|
-| **输出约束** | 只能输出 JSON `{"actions": [...]}`，不能输出解释性文本 |
-| **动作类型白名单** | 只有 7 种动作类型，每种都有固定的字段 Schema |
-| **视觉安全** | 不能将视觉任务降级为夹爪操作或盲移动 |
-| **坐标来源** | LLM 只能用提供的 index，禁止自创坐标 |
-| **空间推理指引** | 明确告诉 LLM "leftmost = 最小 u", "nearest = 最小距离" |
-| **失败策略** | 不确定时返回无效 index 让本地验证器拒绝，而非猜测 |
-| **单视觉动作** | 一个 plan 只能有一个视觉动作，防止 LLM 生成危险的多步序列 |
+## 4. 三条关键数据流
 
-### 2.5 多轮对话与语义历史
+### 4.1 启动和连接
 
-系统维护会话历史，但做了关键的**语义压缩**：
+```mermaid
+sequenceDiagram
+    participant L as ROS Launch
+    participant A as PulseAudio AEC
+    participant K as KWS
+    participant V as voice_realtime_node
+    participant P as Qwen Provider
+    participant Q as Qwen Realtime
 
-```
-原始 LLM 回复:
-{"actions":[{"type":"pick_place","source_index":0,"destination_index":3}]}
-
-压缩后的历史:
-{"actions":[{"type":"pick_place","source_class":"elongated_object","destination_class":"box"}]}
-```
-
-**为什么要压缩？**
-- 具体的 `source_index: 0` 在下一轮对话时已经过期（物体可能移动、检测索引会变）
-- 但语义信息 `source_class: elongated_object` 在多轮对话中有用（如："再拿一个同样的"）
-- 历史最多保留 20 条消息
-
-### 2.6 LLM 如何"理解"空间描述
-
-LLM 不接收图像。它通过**比较 JSON 中的数值**来推理空间关系。
-
-#### "最左边" → 比较 center_uv[0] (u 像素坐标)
-
-```
-candidates 的 u 坐标:  [120, 310, 520]
-                        ↑
-                    最小 u = 图像最左边 = index 0
+    L->>A: 创建llm_aec_source/sink
+    L->>K: 加载本地KWS模型
+    L->>V: 启动协调节点
+    V->>P: connect
+    P->>Q: WebSocket连接并update_session
+    Q-->>P: session.updated
+    P-->>V: session_ready
+    V-->>K: listen_mode=WAKE_ONLY
 ```
 
-LLM 依据系统提示词（System Prompt）中的 "leftmost has the smallest u"，选出 u 坐标最小的候选目标。
+Qwen连接在启动阶段预建立，但在KWS成功前，音频上传字节数必须为零。PulseAudio WebRTC AEC初始化失败时语音链直接失败，不静默退化成可能产生扬声器回声的输入。
 
-#### "最右边" → 比较 center_uv[0]
+### 4.2 唤醒、语音和回答
 
-```
-candidates 的 u 坐标:  [120, 310, 520]
-                                ↑
-                    最大 u = 图像最右边 = index 2
-```
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant K as KWS
+    participant V as Voice节点
+    participant S as SessionState
+    participant Q as Realtime Provider
 
-#### "最近" / "最远" → 欧几里得距离
-
-```
-current_pose: (0.30, 0.0, 0.50)
-
-index 0: base_xyz=(0.25, -0.10, 0.05) → dist = √((0.30-0.25)²+(0-(-0.10))²+(0.50-0.05)²) = 0.464
-index 1: base_xyz=(0.35, -0.08, 0.05) → dist = √((0.30-0.35)²+(0-(-0.08))²+(0.50-0.05)²) = 0.461 ← 最近
-index 2: base_xyz=(0.45, -0.11, 0.04) → dist = √((0.30-0.45)²+(0-(-0.11))²+(0.50-0.04)²) = 0.498
-```
-
-LLM 计算每个 candidate 的 `base_xyz` 到 `current_pose` 的欧几里得距离，选最小/最大的。
-
-#### "前面" / "后面" → 比较 base_xyz[0] (x 坐标)
-
-```
-candidates 的 x 坐标: [0.25, 0.35, 0.45]
-                                ↑
-                  current_pose.x=0.30, 最近且 >0.30 的 = index 1 是"前面"
+    U->>K: 小鹏同学
+    K-->>V: wake_event
+    V->>V: 播放24 kHz“我在”
+    V->>V: 等待150 ms AEC尾延迟
+    V->>S: begin_session
+    V->>Q: 开始发送100 ms音频分片
+    Q-->>V: transcription_completed
+    V->>S: 分配轮次并过滤重复item_id
+    V->>Q: create_response
+    Q-->>V: audio_delta
+    V-->>U: 流式播报
 ```
 
-#### "上面" / "下面" → 比较 base_xyz[2] (z 坐标)
+同一时刻只允许一个回答。用户在播报期间再次讲话时：
 
-```
-candidates 的 z 坐标: [0.05, 0.05, 0.04]
-                      最大 z = index 0 或 1 是"上面"
-```
+1. 本地立即停止扬声器；
+2. 标记旧回答取消；
+3. 如果已有`response_id`，立即向服务端发送取消；
+4. 如果尚无`response_id`，等`response_started`后再取消；
+5. 只保留最新一轮待回答请求；
+6. 迟到的旧音频和工具调用被丢弃。
 
-#### "中间" → 中位数推理
+连接临时中断时，不会重放未完成的机器人命令。连接恢复后会提示“连接已恢复，请重新说刚才的指令”。
 
-虽然 System Prompt 没有明确提及"中间"，但 LLM 具备数值推理能力：
-- 计算所有候选 u 坐标的中位数
-- 选出 u 最接近中位数的候选
+### 4.3 从语言到机械臂动作
 
-### 2.7 消歧安全机制
+```mermaid
+sequenceDiagram
+    participant Q as 实时模型
+    participant V as Voice节点
+    participant T as Task Server
+    participant Y as YOLO/RGB-D
+    participant M as MoveIt
 
-```
-                    用户输入指令
-                         │
-            是否有消歧词?(左/右/前/后/最近/最远/第/编号)?
-                  │                    │
-                 YES                  NO
-                  │                    │
-          reject_ambiguous     reject_ambiguous
-              = False              = True
-                  │                    │
-          LLM 可自由选择        同类物体 > 1 个?
-          一个候选               │         │
-                              YES        NO
-                               │         │
-                        拒绝并要求      LLM 选择
-                        用户澄清      唯一候选 → 通过
-```
-
-**关键点：`"中间"` 不在消歧词列表中。**
-
-| 用户指令 | 同类物体数 | 有消歧词? | 结果 |
-|----------|-----------|----------|------|
-| "抓取最左边的螺丝钉" | 3 | ✅ 有"左" | LLM 选 index 0 → **通过** |
-| "抓取中间的螺丝钉" | 3 | ❌ "中间"不在列表 | LLM 选 index 1 → **被拒绝** |
-| "抓取螺丝钉" | 1 | N/A | LLM 选 index 0 → **通过** |
-| "抓取螺丝钉" | 3 | ❌ 无 | **被拒绝** → 要求澄清 |
-
-**这是设计上的保守策略：** "中间"确实有歧义——是图像左右方向的中间还是机器人前后方向的中间？系统宁可拒绝执行也不冒险猜测。
-
-### 2.8 DeepSeek API 调用
-
-```python
-# deepseek_client.py
-def chat(self, messages, model="deepseek-chat"):
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *history,  # 多轮对话压缩历史
-            {"role": "user", "content": context_json},
-        ],
-        "response_format": {"type": "json_object"},  # 强制 JSON 输出
-        "stream": False,
-    }
-    # POST https://api.deepseek.com/chat/completions
-    # timeout: 30s
+    V->>T: inspect_scene(include_rgb=false)
+    T->>Y: 读取最新同步帧、深度和TF
+    Y-->>T: scene_id与结构化实体
+    T-->>V: CURRENT_YOLO_SCENE
+    V->>Q: 注入当前场景
+    Q-->>V: submit_visual_task(entity_ids)
+    V->>T: AgentCommand
+    T->>T: Schema、场景归属、角色、数量与幂等校验
+    T-->>V: Preview ready
+    V->>T: ExecutePreview
+    T->>Y: 执行前重新绑定当前帧实体
+    T->>M: IK、碰撞检查、规划与执行
+    M-->>T: 完成或失败
+    T-->>V: terminal_state与中文消息
+    V->>Q: 仅朗读确定性结果
 ```
 
-- 使用 `response_format: json_object` 强制 LLM 输出合法 JSON
-- API Key 通过 GNOME Keyring 管理 (`deepseek_credentials.py`)
-- 30 秒超时
+模型收到的是实体ID和结构化属性，不是可直接执行的坐标。执行层重新检查深度、TF、工作空间、IK和碰撞状态。
 
----
+批量抓放时，每次抓放前必须重新检测剩余来源和盒子，并分别在连续两张新鲜帧中稳定。盒子连续5秒不可见时，仅终止当前批次，不进入全局故障锁存，也不读取历史盒位姿。
 
-## 第三阶段：计划验证
+## 5. 工具和本地安全边界
 
-LLM 返回的 JSON 不是直接执行的，而是经过严格的多层验证。
+实时模型可调用：
 
-### 3.1 JSON Schema 验证
+| 工具 | 作用 |
+|---|---|
+| `inspect_scene` | 获取结构化场景，必要时请求一帧RGB |
+| `submit_visual_task` | 提交当前场景中的来源和目的地实体ID |
+| `move_relative` | 按`base_link`固定轴提交有限幅度相对移动 |
+| `set_gripper` | 打开或闭合夹爪 |
+| `ask_user` | 询问真正缺失的信息 |
+| `cancel_task` | 取消尚未完成的任务 |
 
-```python
-def parse_llm_plan(text, candidates, ...):
-    # 1. 必须是合法 JSON
-    data = json.loads(text)
+模型不能调用停止、复位、解锁或home工具。
 
-    # 2. 只能有 {"actions": [...]} 一个顶层键
-    if set(data) != {"actions"}: raise ValueError
+`AgentCommand.srv`使用`call_id`作为幂等键。同一Function Call重复到达时只返回第一次结果，不创建第二个Preview。执行动作必须经过`ExecutePreview.action`，模型不能绕过Preview直接驱动MoveIt。
 
-    # 3. actions 必须在 1-8 个之间
-    if not 1 <= len(actions) <= 8: raise ValueError
+`submit_visual_task`只接受当前`scene_id`中的实体。单个合法字符串ID可以被规范化为单元素数组；未知ID、逗号串、对象、重复ID、旧场景和超过10个目标会被拒绝。JSON或Schema失败只允许模型修复一次，第二次仍失败时零执行。
 
-    # 4. 每个 action 的字段必须完全匹配 Schema
-    #    pick: {"type","source_index"}
-    #    pick_place: {"type","source_index","destination_index"}
-    #    move_relative: {"type","dx","dy","dz","droll_deg","dpitch_deg","dyaw_deg","frame_id"}
-    #    ...
+## 6. `setup_voice_runtime.sh`到底做什么
+
+脚本路径：
+
+```text
+src/llm_arm_control/scripts/setup_voice_runtime.sh
 ```
 
-### 3.2 Candidate 验证
+它是安装和检查工具，不是ROS节点，也不会发送机械臂运动指令。
 
-```python
-# source_index 必须是候选列表中的索引
-# source 的 class_name 必须在 pick_classes (elongated_object, cube) 中
-# destination 的 class_name 必须在 place_classes (box) 中
+### 6.1 无参数运行
 
-if selected.class_name not in allowed_classes:
-    raise ValueError(f"class {name!r} is not pickable")
-
-# pick_place 的 source 和 destination 不能相同
-if source_index == destination_index:
-    raise ValueError("source and destination must differ")
+```bash
+./src/llm_arm_control/scripts/setup_voice_runtime.sh
 ```
 
-### 3.3 Intent 验证
+用于第一次配置，或者Python依赖、KWS模型损坏/缺失后的恢复：
 
-```python
-# 如果用户指令包含视觉意图词(抓/放/pick/place...)
-# 但 LLM 返回的 plan 没有视觉动作(pick/place/pick_place)
-# → 拒绝。禁止 LLM 将视觉任务降级为 set_gripper 或 move_relative
+1. 安装锁定版本的Sherpa-ONNX、关键词处理依赖和DashScope SDK；
+2. 读取`voice_models.lock.yaml`；
+3. 包内KWS文件缺失时下载到临时目录；
+4. 校验归档大小和SHA256；
+5. 从上游版本目录提取并重命名为扁平的运行时文件；
+6. 生成关键词文件，并拒绝符号链接形式的托管资产；
+7. 退出时删除临时下载归档。
+
+模型已经存在时不会重复下载。
+
+### 6.2 `--check-only`
+
+```bash
+./src/llm_arm_control/scripts/setup_voice_runtime.sh --check-only
 ```
 
-### 3.4 状态机验证
+用于启动前或故障排查。它不安装、不下载、不联网，只验证：
 
-```python
-# 已持有物体时，只能 place，不能 pick
-# 未持有时，只能 pick，不能 place
-# 放置失败后保持 HOLDING；请创建新的确认预览。
+- Python依赖版本；
+- `aplay`和`pactl`；
+- PulseAudio AEC模块；
+- 包内KWS目录、普通文件和运行时文件完整性。
+
+它不要求DashScope密钥，因为没有建立云连接。
+
+### 6.3 `--check-cloud`
+
+```bash
+./src/llm_arm_control/scripts/setup_voice_runtime.sh --check-cloud
 ```
 
----
+它先完成`--check-only`，再检查：
 
-## 第四阶段：动作富化（将抽象计划变为可执行的 3D 位姿序列）
+- `DASHSCOPE_API_KEY`；
+- `DASHSCOPE_WORKSPACE_ID`；
+- Qwen Realtime身份验证和一次WebSocket连接。
 
-LLM 的 JSON 只包含 `{"type":"pick","source_index":0}`，需要将其"富化"为包含 3D 位姿的完整步骤序列。
+连接成功后立即关闭。它不启动ROS、Gazebo、MoveIt或机械臂。当前只有Qwen适配器，因此该选项明确检查Qwen。
 
-### 4.1 抓取高度计算
+### 6.4 其他选项
 
-有两种模式（由 `use_visual_z` 参数控制）：
+```bash
+# 首次安装系统音频依赖，可与无参数安装组合
+./src/llm_arm_control/scripts/setup_voice_runtime.sh --install-system-deps
 
-**固定高度模式（默认）：**
-```
-grasp_z  = 0.02m    (桌面以上 2cm)
-approach = 0.12m    (抓取点以上 10cm)
-carry    = 0.15m    (搬运高度)
-```
-
-**视觉高度模式：**
-```
-grasp_z  = 物体Z + visual_grasp_offset_z   (基于检测到的物体实际高度)
-approach = grasp_z + 0.10m
-carry    = grasp_z + 0.13m
-```
-
-### 4.2 抓取姿态计算
-
-```python
-def _grasp_quat(self, yaw):
-    # roll=0°, pitch=-180° (夹爪朝下)
-    # yaw = 物体偏航角 + π/2 (从物体最长边的侧面夹取)
-    return Rotation.from_euler(
-        "xyz",
-        [0.0, -180.0, math.degrees(yaw + math.pi/2)],
-        degrees=True
-    ).as_quat()
-```
-
-### 4.3 动作展开示例
-
-**LLM 输出：** `{"type":"pick_place","source_index":0,"destination_index":3}`
-
-**展开为 13 个具体步骤：**
+# 修改关键词定义后重新生成keywords.txt
+./src/llm_arm_control/scripts/setup_voice_runtime.sh --refresh-keywords
 
 ```
-PICK 阶段 (6步):
-┌─────┬──────────────────┬────────────┬──────────────────────────┐
-│ 步  │ 操作             │ 运动模式    │ 说明                     │
-├─────┼──────────────────┼────────────┼──────────────────────────┤
-│  1  │ open_gripper     │ -          │ 打开夹爪到 0.061m         │
-│  2  │ go_home          │ Joint(BiRRT*)│ 回到预定义安全关节角    │
-│  3  │ approach_pick    │ Joint(BiRRT*)│ 到抓取点上方, 0.5x 速度 │
-│  4  │ grasp            │ Cartesian   │ 直线下降到抓取高度,0.2x │
-│  5  │ close_gripper    │ -           │ 闭合夹爪                  │
-│  6  │ carry            │ Cartesian   │ 直线提升到搬运高度,0.2x  │
-├─────┼──────────────────┼────────────┼──────────────────────────┤
-│PLACE 阶段 (7步):                                                    │
-├─────┼──────────────────┼────────────┼──────────────────────────┤
-│  7  │ re_detect_box    │ -          │ 采集5帧盒子位置+稳定性验证│
-│  8  │ approach_box     │ Joint(BiRRT*)│ 到盒子安全高度, 0.5x    │
-│  9  │ release          │ Cartesian   │ 直线下降到释放高度,0.2x  │
-│ 10  │ release_gripper  │ -           │ 打开夹爪释放              │
-│ 11  │ box_retreat      │ Cartesian   │ 直线后退到安全高度,0.5x  │
-│ 12  │ return_home      │ Joint(BiRRT*)│ 回到 home                │
-│ 13  │ close_gripper    │ -           │ 闭合夹爪(回初始状态)      │
-└─────┴──────────────────┴────────────┴──────────────────────────┘
+
+脚本不接受模型目录覆盖；它自动识别源码包或安装后的package share。通常只在首次部署、依赖升级、模型缺失或语音链故障时运行，不需要在每次`ros2 launch`前重复运行。
+
+仓库仅对`src/llm_arm_control/model/**/*.onnx`和
+`src/visual_perception/models/*.{pt,onnx}`开放Git跟踪；TensorRT
+`.engine`、`.blob`及其他训练资产仍被忽略。KWS归档来源、大小和SHA256记录在
+`config/voice_models.lock.yaml`。其中许可证状态仍为
+`model_specific_license_not_published`，提交或再分发模型前必须由项目方单独完成许可证审查。
+
+## 7. 从零完成本地配置
+
+### 7.1 检查音频设备
+
+```bash
+arecord -l
+pactl get-default-source
+pactl get-default-sink
 ```
 
-**为什么 grasp/carry/release 必须用 Cartesian 直线运动？**
-- 抓取和释放阶段，夹爪在物体附近，用 Joint space 规划可能走出弧线路径，碰撞到物体侧面
-- Cartesian 直线确保末端沿 Z 轴垂直上升/下降。
+仿真和实机默认都使用`audio_input_device:=auto`。启动时系统优先选择有效的默认物理采集源，并排除monitor、HDMI输出监听源和项目自己的`llm_aec_source`。如果只有一个物理麦克风会自动选择它；如果存在多个候选且默认源无效，Launch会列出候选并停止，避免录错设备。
 
-### 4.4 安全性检查
+也可以用精确PulseAudio source名称或ALSA地址覆盖：
 
-每个计算出的位姿在加入计划前，都要通过：
+```bash
+# 精确PulseAudio名称
+audio_input_device:=alsa_input.pci-0000_00_1f.3.analog-stereo
 
-```python
-def _check_pose(self, pose):
-    # 1. 工作空间范围检查
-    #    X: [-0.10, 0.60], Y: [-0.60, 0.60], Z: [0.01, 0.55]
-    if not workspace_ok(xyz): raise ValueError
-
-    # 2. 碰撞感知 IK 检查 (通过 MoveIt2 compute_ik)
-    if moveit2_arm.compute_ik(xyz, quat) is None:
-        raise ValueError("no collision-aware IK solution")
+# 精确ALSA采集卡和设备
+audio_input_device:=plughw:0,0
 ```
 
----
+显式设备不存在时会直接报错，不再静默切换到默认麦克风。`audio_input_volume_percent`默认是`100`，范围为1到100；语音链启动前会解除静音、设置输入音量并重新读取确认。这个动作只改变所选采集源，不改变KWS阈值。
 
-## 第五阶段：预览-确认-执行
+### 7.2 安装运行时和模型
 
-### 5.1 两阶段提交协议
-
-系统采用"预览-确认"模式，防止 LLM 幻觉导致的误操作：
-
-```
-阶段 1: PreviewCommand 服务 (/llm_control/preview_command)
-  - 生成完整的执行计划
-  - 计算所有 3D 位姿
-  - 验证所有 IK 可行性
-  - 返回详细的 JSON 预览给用户
-  - 状态: IDLE → PREVIEW_READY
-  - 有效期: 15 秒
-
-阶段 2: ExecutePreview Action (/llm_control/execute_preview)
-  - 用户输入 y 确认
-  - 重新验证物体位置（可能在预览期间移动）
-  - 逐步执行动作序列
-  - 每步发布反馈 (step_index/step_count/phase/message)
+```bash
+cd ${HOME}/my-workspace/fairino_robotarm
+./src/llm_arm_control/scripts/setup_voice_runtime.sh --install-system-deps
+./src/llm_arm_control/scripts/setup_voice_runtime.sh --check-only
 ```
 
-### 5.2 执行前重新验证
+`sudo apt-get`只出现在`--install-system-deps`路径。普通检查不需要管理员权限。
 
-在预览生成和实际执行之间，物体可能移动。执行前需要：
+### 7.3 配置Qwen凭据
 
-```python
-def _revalidate(self, record):
-    # 预览确认的 pick 位姿直接执行；执行前仍检查持物和安全状态。
-    action["source"] = revalidate_candidate(original, "pick target", 0.002)
+密钥和业务空间ID只通过环境变量提供，不写入YAML、Git或日志：
 
-    # place 目标使用预览确认时的盒子位姿。
-    action["destination"] = revalidate_candidate(original, "box", 0.05)
+```bash
+read -rsp "DashScope API Key: " DASHSCOPE_API_KEY && echo
+read -rp "DashScope Workspace ID: " DASHSCOPE_WORKSPACE_ID
+export DASHSCOPE_API_KEY DASHSCOPE_WORKSPACE_ID
 ```
 
-### 5.3 盒子重检测与重定位
+当前使用华北2北京业务空间专属WebSocket域名。业务空间ID只允许字母、数字、下划线和连字符。
 
-放置阶段，盒子可能在 preview 和执行之间移动。系统采集 5 帧新鲜检测来处理：
+验证云连接：
 
-```
-采集 5 帧盒子检测样本
-         │
-         ▼
-计算 5 帧 XY 位置的中位数
-         │
-         ▼
-检查 5 帧间的最大两两 XY 距离 → < 1cm (stability_threshold)?
-    NO ──→ 重新采集（盒子在移动中）
-    YES
-         │
-         ▼
-计算 preview 位置 vs 当前中位数的 XY 偏移
-         │
-    < 1cm (retarget_threshold)  → "unchanged" 用原位置
-    < 5cm (max_shift)           → "relocate"  重定位到新位置
-    ≥ 5cm                        → "reject"   拒绝执行，要求重新预览
+```bash
+./src/llm_arm_control/scripts/setup_voice_runtime.sh --check-cloud
 ```
 
-预览确认后不进行盒子的多帧重检；执行前应保持盒子静止。
+### 7.4 构建
 
----
-
-## 第六阶段：安全与状态管理
-
-### 6.1 状态机
-
-```
-                    ┌─────────────────────────────────────┐
-                    │              IDLE                    │
-                    └──────────┬──────────────────────────┘
-                               │ preview
-                               ▼
-                    ┌──────────────────────┐
-                    │   PREVIEW_READY      │
-                    │   (15秒有效期)        │
-                    └──────────┬───────────┘
-                               │ execute (y)
-                               ▼
-                    ┌──────────────────────┐
-                    │     EXECUTING        │
-                    └──────────┬───────────┘
-                               │
-            ┌──────────────────┼──────────────────┐
-            │                  │                  │
-        pick only        place 失败          全部完成
-            │                  │                  │
-            ▼                  ▼                  ▼
-    ┌───────────┐    ┌────────────────┐    ┌──────────┐
-    │  HOLDING  │                    │IDLE/HOLDING│
-    │(持有物体) │    │(等待放置重试)  │    └──────────┘
-    └─────┬─────┘    └───────┬────────┘
-          │                  │
-          │ 新 preview
-          │ (pick_place)     │ → execute
-          │                  │
-          ▼                  ▼
-    ┌──────────────┐    ┌──────────────┐
-    │  EXECUTING   │    │  EXECUTING   │
-    └──────────────┘    └──────────────┘
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select llm_arm_control visual_perception myrobot_simulation
+source install/setup.bash
 ```
 
-**任意状态 → STOPPED / RESETTING / RESET_FAILED**：由用户按键触发
+重新打开终端后，需要再次source ROS和工作区；环境变量也必须在启动ROS的同一环境中存在。
 
-### 6.2 Safety Epoch 机制
+### 7.5 检查配置
 
-```python
-# 每次 stop/reset 递增 epoch
-# 所有预览和执行都绑定到特定 epoch
-# epoch 变化 → 之前的所有预览立即失效
+主要配置文件：
 
-def safety_execution_valid(state, execution_epoch):
-    return not state.blocked and state.epoch == execution_epoch
+```text
+src/llm_arm_control/config/llm_robot_control_params.yaml
 ```
 
-### 6.3 持有状态管理
+常用参数：
 
-```python
-# self._held_source — 当前夹爪中持有的物体 (ResolvedCandidate)
-
-# HOLDING 状态: 刚完成 pick，等待用户下一个指令
-# 放置阶段失败后保持 HOLDING，操作者可创建新的放置预览。
+```yaml
+voice_realtime_node:
+  ros__parameters:
+    realtime_provider: qwen
+    model: qwen3.8-omni-flash-realtime
+    voice: Tina
+    vad_silence_ms: 700
+    audio_chunk_ms: 100
+    idle_timeout_sec: 30.0
 ```
 
-### 6.4 键盘快捷键
+不要为了接入另一个模型而修改任务服务器、YOLO或MoveIt协议。应该新增Provider适配器并把原始事件转换为统一事件。
 
-| 按键 | 命令 | 效果 |
-|------|------|------|
-| 空格 | stop | 立即停止 + 取消当前 Action |
-| h | reset | 停止 → 打开夹爪 → 回 Home |
-| r | resume | 清除停止状态（不恢复已取消任务） |
-| y | - | 确认执行当前预览 |
-| n | - | 丢弃当前预览 |
+## 8. 正常启动
 
----
+### 8.1 先查看Launch参数
 
-## 完整端到端数据流
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  相机硬件                                                           │
-│  Realsense / OAK-D                                                  │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ RGB Image + Depth Image
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  visual_perception / llm_visual_perception.py                            │
-│  - YOLOv8 OBB 推理 (Ultralytics)                                    │
-│  - 发布 /yolo/detected_result (class_name, confidence, 4角点像素坐标) │
-│  - 发布 /yolo/detected_result/depth (对齐深度图)                     │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ ROS2 Topics
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  LlmControlTaskServer._resolve_candidate()                         │
-│  - YOLO + Depth 时间同步 (<50ms 容差)                                │
-│  - robust_center3d_from_obb_depth (MAD 异常值剔除)                   │
-│  - OBB 最长边 → yaw 角计算                                          │
-│  - TF: camera_frame → base_link                                     │
-│  - 输出: ResolvedCandidate (index, class, confidence, uv, xyz, yaw) │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ candidates JSON
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  用户输入: "抓取最左边的螺丝钉"                                       │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  LlmControlTaskServer._llm_plan()                                  │
-│  - instruction_has_visual_intent (视觉意图检测)                       │
-│  - 本地确定性目标选择（类别/图像方位/末端距离）                         │
-│  - _has_disambiguator (消歧词检测)                                   │
-│  - 构建 context JSON: {instruction, candidates, holding, pose}       │
-│  - 多轮对话历史压缩（语义级，去除具体 index）                          │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ context JSON
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  DeepSeekClient.chat()                                              │
-│  POST https://api.deepseek.com/chat/completions                     │
-│  - model: deepseek-chat                                             │
-│  - response_format: {"type": "json_object"}                         │
-│  - System Prompt + 历史 + 当前上下文                                 │
-│  - 返回: {"actions": [{"type":"pick","source_index":0}]}             │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ JSON response
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  parse_llm_plan() — 多层验证                                        │
-│  1. JSON 合法性检查                                                  │
-│  2. Schema 字段验证                                                  │
-│  3. Candidate index 存在性验证                                       │
-│  4. Class 约束验证 (source∈pick_classes, dest∈place_classes)         │
-│  5. 消歧检查 (同类多物体 + 无消歧词 → 拒绝)                           │
-│  6. Intent 一致性验证 (视觉意图↔视觉动作)                              │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ TaskPlan (verified)
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  _enrich_plan() — 动作富化                                           │
-│  - 重新 resolve 每个视觉目标的 3D 位姿                                │
-│  - 计算 approach/grasp/carry/release 高度                           │
-│  - 计算 grasp quaternion (roll=-180°, yaw=物体yaw+π/2)              │
-│  - _check_pose: 工作空间 + 碰撞感知 IK 验证                          │
-│  - 展开为 6-13 步具体执行序列                                        │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ enriched plan + public preview JSON
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  返回给用户: Preview JSON                                            │
-│  包含: preview_id, detections, steps, valid_for_sec, checks          │
-│  用户看到 13 步详细计划，输入 y 确认                                  │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ y (确认)
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  _execute_preview() — 逐步执行                                       │
-│  - _revalidate: 重新检测物体位置                                      │
-│  - 执行 PICK 阶段 (open→home→approach→grasp→close→carry)            │
-│  - _collect_box_samples: 5帧盒子重检测+稳定性+重定位                  │
-│  - 执行 PLACE 阶段 (approach→release→open→retreat→home→close)       │
-│  - 每步发布 ExecutePreview.Feedback                                  │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ Joint space / Cartesian 运动目标
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  myrobot_planning_core + trajectory_retime_server                    │
-│  - MoveItMotion.move_to_pose (planning_client="fairino")            │
-│  - BiRRT* 路径规划                                                   │
-│  - TOTG 时间最优重定时                                                │
-│  - ros2_control → fairino_hardware → libfairino.so → 电机            │
-└─────────────────────────────────────────────────────────────────────┘
+ros2 launch myrobot_simulation llm_robot_control_sim.launch.py --show-args
+ros2 launch llm_arm_control llm_robot_control.launch.py --show-args
 ```
 
----
+### 8.2 Gazebo仿真
 
-## 关键文件索引
+```bash
+ros2 launch myrobot_simulation llm_robot_control_sim.launch.py
+```
 
-| 文件 | 职责 |
-|------|------|
-| [llm_control_task_server.py](../../llm_arm_control/llm_arm_control_nodes/llm_control_task_server.py) | 主任务服务器：视觉同步、LLM 推理编排、动作富化、执行 |
-| [task_logic.py](../../llm_arm_control/llm_arm_control_nodes/task_logic.py) | 纯函数库：JSON 解析、计划验证、消歧、安全状态、盒子重定位 |
-| [deepseek_client.py](../../llm_arm_control/llm_arm_control_nodes/deepseek_client.py) | DeepSeek API 客户端（纯标准库，无第三方依赖） |
-| [deepseek_credentials.py](../../llm_arm_control/llm_arm_control_nodes/deepseek_credentials.py) | API Key 管理（GNOME Keyring） |
-| [robot_pose_control_server.py](../../llm_arm_control/llm_arm_control_nodes/robot_pose_control_server.py) | 基类：MoveIt2 初始化、运动执行、夹爪控制 |
-| [llm_control_cli.py](../../llm_arm_control/llm_arm_control_nodes/llm_control_cli.py) | 交互式终端客户端 |
+指定麦克风：
 
----
+```bash
+ros2 launch myrobot_simulation llm_robot_control_sim.launch.py \
+  audio_input_device:=plughw:0,0 \
+  audio_input_volume_percent:=100
+```
 
-## 设计哲学
+### 8.3 真实机械臂
 
-1. **LLM 不做视觉** — LLM 只处理结构化数值，视觉理解完全交给 YOLO + 深度估计
-2. **LLM 不生成坐标** — LLM 只用系统提供的 candidate index，禁止自创位姿
-3. **多层防御验证** — LLM 输出经过 Schema → Candidate → Intent → IK 四层验证
-4. **两阶段提交** — 预览-确认模式防止 LLM 幻觉导致误操作
-5. **保守消歧策略** — 宁可拒绝执行，也不冒险猜测用户的模糊指令
-6. **状态机驱动** — 所有操作都有明确的状态约束（持有、恢复、停止）
+确认硬件急停、控制器、相机、手眼标定、工作空间和MoveIt配置均已独立验证后再启动：
+
+```bash
+ros2 launch llm_arm_control llm_robot_control.launch.py
+```
+
+仿真与实机共用语音Provider、工具协议和本地校验。差异主要位于相机来源、机器人驱动、MoveIt控制器和标定TF。
+
+## 9. 一条抓放命令的完整例子
+
+用户说：
+
+> 小鹏同学，把最左边的螺栓放进盒子。
+
+可能的数据变化如下：
+
+```text
+麦克风PCM
+→ KWS命中“小鹏同学”
+→ 播放“我在”
+→ Qwen转写命令
+→ 本地inspect_scene生成scene-42
+→ Qwen选择bolt-2与box-1
+→ submit_visual_task(
+     operation="pick_place",
+     scene_id="scene-42",
+     source_entity_ids=["bolt-2"],
+     destination_entity_id="box-1"
+   )
+→ 本地Schema和场景归属校验
+→ 创建Preview
+→ ExecutePreview
+→ 当前帧重新检测bolt和box
+→ 深度、TF、IK、碰撞和MoveIt规划
+→ 机械臂执行
+→ 播报完成或具体错误
+```
+
+如果模型自造`bolt-99`，任务服务器会拒绝。如果盒子在执行前消失，系统不会使用旧盒位姿，而是终止当前批次并允许下一项新任务。
+
+## 10. 诊断方法
+
+```bash
+ros2 service call /llm_control/status std_srvs/srv/Trigger '{}'
+ros2 topic echo /voice_control/listen_mode
+ros2 topic hz /voice_control/audio
+ros2 topic hz /yolo/detected_result
+
+# 临时查看更详细的KWS音频健康诊断
+ros2 param set /voice_wake_node voice_diagnostics_enabled true
+```
+
+关键日志：
+
+默认`INFO`会显示音频路由、首个健康窗口、唤醒命中和输入转写；其他完整结构化追踪默认位于`DEBUG`。音频、视觉同步和取消等可恢复问题使用`WARN`，连接、模型、执行和超时失败使用`ERROR`。
+
+| 日志 | 用途 |
+|---|---|
+| `VOICE_AUDIO_ROUTE` | 实际选择的物理麦克风、ALSA映射、音量、静音状态和AEC绑定；不含凭据 |
+| `VOICE_AUDIO_HEALTH` | 首个5秒窗口必定输出一次；显示发布者、格式、帧数、RMS、峰值和静音比例 |
+| `VOICE_AUDIO_UNHEALTHY` | 区分无发布者、无音频信息、格式错误、无帧、数字静音和持续低电平 |
+| `WAKE_TRACE` | 本地KWS实际命中的规范化唤醒词 |
+| `QWEN_INPUT` | 云端输入转写 |
+| `QWEN_OUTPUT`（DEBUG） | 云端输出转写 |
+| `QWEN_AUDIO_TRACE`（DEBUG） | 语音轮次、取消、排队和重复过滤 |
+| `QWEN_RESPONSE_TRACE`（DEBUG） | 回答完成、取消或截断原因 |
+| `QWEN_TOOL_TRACE`（DEBUG） | 工具名、字段、修复次数和Preview结果，不记录原始敏感参数 |
+| `QWEN_CONNECTION_ERROR` | 云连接错误、关闭码和连接代次 |
+| `SCENE_TRACE`（DEBUG） | 场景ID、实体角色和不可用原因 |
+| `VISION_SYNC` | RGB、Depth、同步和推理频率 |
+| `BATCH_TRACE`（DEBUG） | 来源与目的地稳定状态、盒子数量和失败阶段 |
+
+常见判断：
+
+- 没有`WAKE_TRACE`：先看`VOICE_AUDIO_ROUTE`是否选中真实麦克风，再看`VOICE_AUDIO_HEALTH`的帧数、RMS和峰值；只有路由和输入电平正常后才检查KWS文件和阈值；
+- 有唤醒但没有`QWEN_INPUT`：检查凭据、WebSocket和AEC后的音频话题；
+- 工具被拒绝：查看`QWEN_TOOL_TRACE`和任务服务器错误码；
+- 有实体但不能执行：检查深度、TF、工作空间、IK和碰撞状态；
+- 盒子中途消失：这是实时视觉失败，不是来源目标“不稳定”。
+
+## 11. 验证结果应该怎样表述
+
+不同验证层次不能混为一谈：
+
+- `py_compile`和单元测试：证明Python语法和模拟事件行为；
+- `colcon build`：证明ROS包可以构建；
+- `--check-only`：证明本地语音依赖和KWS文件存在；
+- `--check-cloud`：证明一次Qwen认证和WebSocket连接；
+- Gazebo语音抓放：证明仿真端到端链路；
+- 真机抓放：证明特定硬件、环境和安全条件下的实际结果。
+
+单元测试通过不能证明麦克风唤醒率、扬声器AEC效果、云端长期稳定性、YOLO召回率或真实机械臂安全验收已经完成。
+
+## 12. 架构维护边界
+
+- Qwen SDK和原始协议由`QwenRealtimeProvider`负责；
+- 单飞回答、取消、重连和轮次由`RealtimeSessionState`负责；
+- 工具Schema、系统提示词、参数解析和修复提示由`agent_protocol.py`负责；
+- `task_logic.py`只维护任务领域模型、安全状态、Preview生命周期和确定性反馈；
+- `voice_logic.py`是无ROS依赖的唤醒词纯函数，由唤醒节点、实时语音节点和测试共享。
+
+当前规范唤醒词只有“小鹏同学”“小鹏小鹏”“Hi Robot”，匹配时忽略大小写、空格和标点。新增模型Provider、音频队列或工具缓存前，应先用运行日志证明现有边界不能满足需求；不能为了扩展性让模型协议、ROS协调和运动安全重新耦合。

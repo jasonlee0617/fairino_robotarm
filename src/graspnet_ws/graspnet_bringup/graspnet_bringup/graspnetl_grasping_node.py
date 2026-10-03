@@ -669,12 +669,11 @@ class GraspnetVisualGraspingNode(Node):
         result = future.result()
         if not result.success:
             self._last_compute_error = str(result.message)
-            log = (
-                self.get_logger().info
-                if self._last_compute_error.startswith("CANCELED:")
-                else self.get_logger().error
-            )
-            log(f"/grasp/compute failed: {self._last_compute_error}")
+            message = f"/grasp/compute failed: {self._last_compute_error}"
+            if self._last_compute_error.startswith("CANCELED:"):
+                self.get_logger().info(message)
+            else:
+                self.get_logger().error(message)
             return False
         self._last_compute_error = ""
         return bool(result.success)

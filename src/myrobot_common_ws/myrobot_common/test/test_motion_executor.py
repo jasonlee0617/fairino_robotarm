@@ -5,6 +5,7 @@ import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
 from types import SimpleNamespace
@@ -35,11 +36,28 @@ class _BlockedAbort:
 
 
 class _Future:
-    def __init__(self, done=True):
+    def __init__(self, done=True, result=None):
         self._done = done
+        self._result = result
 
     def done(self):
         return self._done
+
+    def result(self):
+        return self._result
+
+
+class _CartesianClient:
+    def __init__(self, response):
+        self.response = response
+        self.request = None
+
+    def wait_for_service(self, timeout_sec):
+        return True
+
+    def call_async(self, request):
+        self.request = request
+        return _Future(result=self.response)
 
 
 class _ConfigurationMoveIt(_FakeArm):
@@ -78,6 +96,7 @@ class _PoseMoveIt(_FakeArm):
         self.trajectory = trajectory
         self.executed = None
         self.plan_kwargs = None
+        self.joint_state = JointState(name=["j1", "j2"], position=[0.1, -0.2])
 
     def clear_path_constraints(self):
         pass
@@ -236,7 +255,6 @@ class TestWaitClientReady:
         assert arm.executed.header.stamp.nanosec == 123
 
     def test_plan_to_pose_forwards_tolerances_and_start_state(self, ros_node):
-        from sensor_msgs.msg import JointState
         from myrobot_common.planning.motion_executor import MoveItMotion
 
         trajectory = JointTrajectory()
@@ -253,6 +271,65 @@ class TestWaitClientReady:
         assert arm.plan_kwargs["tolerance_position"] == 0.004
         assert arm.plan_kwargs["tolerance_orientation"] == 0.03
         assert arm.plan_kwargs["start_joint_state"] is start
+
+    def test_cached_trajectory_is_copied_checked_and_timestamp_cleared(self, ros_node):
+        from myrobot_common.planning.motion_executor import MoveItMotion
+
+        trajectory = _trajectory(37)
+        trajectory.joint_names = ["j1", "j2"]
+        trajectory.points = [JointTrajectoryPoint(positions=[0.1, -0.2])]
+        arm = _PoseMoveIt(trajectory)
+        motion = MoveItMotion(node=ros_node, arm_clients={"fairino": arm}, action_delay=0.0)
+        motion._wait = lambda *_args: True
+
+        assert motion.execute_trajectory(
+            trajectory, "cached", start_tolerance_rad=0.02
+        )
+        assert arm.executed is not trajectory
+        assert arm.executed.header.stamp.sec == 0
+        assert trajectory.header.stamp.sec == 37
+
+        arm.joint_state.position[0] = 0.2
+        arm.executed = None
+        assert not motion.execute_trajectory(
+            trajectory, "cached", start_tolerance_rad=0.02
+        )
+        assert arm.executed is None
+
+    def test_trajectory_endpoint_becomes_next_virtual_start(self, ros_node):
+        from myrobot_common.planning.motion_executor import MoveItMotion
+
+        trajectory = JointTrajectory(joint_names=["j1", "j2"])
+        trajectory.points = [JointTrajectoryPoint(positions=[0.3, -0.4])]
+        state = MoveItMotion.trajectory_end_joint_state(trajectory)
+
+        assert state.name == ["j1", "j2"]
+        assert list(state.position) == [0.3, -0.4]
+
+    def test_fairino_cartesian_request_uses_virtual_start_and_collision_check(self, ros_node):
+        from moveit_msgs.msg import MoveItErrorCodes
+        from myrobot_common.planning.motion_executor import MoveItMotion
+
+        trajectory = JointTrajectory(joint_names=["j1", "j2"])
+        trajectory.points = [JointTrajectoryPoint(positions=[0.3, -0.4])]
+        response = SimpleNamespace(
+            error_code=SimpleNamespace(val=MoveItErrorCodes.SUCCESS),
+            fraction=1.0,
+            solution=SimpleNamespace(joint_trajectory=trajectory),
+        )
+        arm = _PoseMoveIt(trajectory)
+        arm.group_name = "robot_arm"
+        arm.end_effector_name = "tool0"
+        motion = MoveItMotion(node=ros_node, arm_clients={"fairino": arm}, action_delay=0.0)
+        client = _CartesianClient(response)
+        motion._fairino_cartesian_client = client
+        virtual_start = JointState(name=["j1", "j2"], position=[0.3, -0.4])
+
+        assert motion._plan_fairino_cartesian(
+            arm, _pose(), "cache", 0.98, virtual_start
+        ) is trajectory
+        assert client.request.start_state.joint_state is virtual_start
+        assert client.request.avoid_collisions is True
 
 
 def test_ik_client_and_pipeline_are_independent_valid_choices():

@@ -102,6 +102,7 @@
   depth_v_fov:=1.0122909661567112
   depth_near_m:=0.28
   depth_far_m:=3.0
+  native_depth_enabled:=true
   triggered:=false">
 
     <!-- Realsense D435 RGB properties
@@ -143,17 +144,19 @@
                                            min_depth="${depth_near_m}"
                                            max_depth="${depth_far_m}"
                                            camera_info_topic="${gz_topic_name}/aligned_depth/camera_info"/>
-        <xacro:gazebo_depth_camera name="${name}"
-                                   fps="${fps}"
-                                   gz_topic_name="${gz_topic_name}/native_depth/image"
-                                   image_width="${depth_image_width}"
-                                   image_height="${depth_image_height}"
-                                   fx="${depth_fx}" fy="${depth_fy}" cx="${depth_cx}" cy="${depth_cy}"
-                                   k1="${depth_k1}" k2="${depth_k2}" k3="${depth_k3}" p1="${depth_p1}" p2="${depth_p2}"
-                                   h_fov="${depth_h_fov}"
-                                   v_fov="${depth_v_fov}"
-                                   min_depth="${depth_near_m}"
-                                   max_depth="${depth_far_m}"/>
+        <xacro:if value="${native_depth_enabled}">
+            <xacro:gazebo_depth_camera name="${name}"
+                                       fps="${fps}"
+                                       gz_topic_name="${gz_topic_name}/native_depth/image"
+                                       image_width="${depth_image_width}"
+                                       image_height="${depth_image_height}"
+                                       fx="${depth_fx}" fy="${depth_fy}" cx="${depth_cx}" cy="${depth_cy}"
+                                       k1="${depth_k1}" k2="${depth_k2}" k3="${depth_k3}" p1="${depth_p1}" p2="${depth_p2}"
+                                       h_fov="${depth_h_fov}"
+                                       v_fov="${depth_v_fov}"
+                                       min_depth="${depth_near_m}"
+                                       max_depth="${depth_far_m}"/>
+        </xacro:if>
     </xacro:if>
 
 </xacro:macro>

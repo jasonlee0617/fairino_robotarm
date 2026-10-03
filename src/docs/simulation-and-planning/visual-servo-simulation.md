@@ -1,5 +1,9 @@
 # Gazebo 位置伺服纯跟踪数据流
 
+[返回技术文档中心](../README.md)
+
+该入口验证“全局移动到目标上方，再由速度伺服连续跟踪”的闭环。它不执行夹爪、下降抓取、抬升或放置。
+
 入口命令：
 
 ```bash
@@ -50,3 +54,21 @@ ANY -> ERROR -> IDLE
 5. `COMPLETED` 清理缓存并进入 `IDLE`；下一次收到新鲜检测后立即重复以上流程。
 
 纯跟踪不执行夹爪、下降抓取、抬升或放置；`box` 不需要轴向消息，也可直接跟踪。
+
+## 控制器与参数
+
+`visual_servo_bringup/config/visual_position_servo_params.yaml` 是位置伺服参数源。运行时通过 `controller_type` 选择 `PID`、`PD`、`PI_FF`、`ADAPTIVE_PID`、`LADRC`、`NLADRC` 或 `MPC`；各控制器共享误差输入、速度输出和限幅执行链，不改变状态机职责。
+
+## 安全与验证
+
+- Servo 输出仍受速度、加速度、工作空间和消息新鲜度约束；
+- 目标丢失或时间戳过期会先发布零 Twist，再退出跟踪；
+- 软件停止不是安全等级急停，真实机械臂必须使用独立硬件安全链路。
+
+```bash
+ros2 launch myrobot_simulation visual_position_servo_sim.launch.py --show-args
+ros2 topic echo /task_state
+ros2 topic hz /servo_node/delta_twist_cmds
+```
+
+`--show-args` 只验证 Launch 接口；完整验收还需要检查 Gazebo 中的目标运动、跟踪误差、限幅和停止恢复。

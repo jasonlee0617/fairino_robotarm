@@ -1,3 +1,27 @@
+# Fairino ROS 2 字符串命令常用接口
+
+[返回硬件接口说明](README.md)
+
+本文是 `/FR_ROS_API_service` 的常用命令速查，不是完整 API 列表。当前服务实际可调度命令以
+`include/fairino_hardware/command_server.hpp` 中的 `_fr_function_list` 为准，参数解析行为以
+`src/command_server.cpp` 为准。厂商 SDK 版本变化后，应先核对源码再使用本文示例。
+
+调用格式：
+
+```bash
+ros2 service call /FR_ROS_API_service fairino_msgs/srv/RemoteCmdInterface \
+  "{cmd_str: 'SetSpeed(10)'}"
+```
+
+> [!WARNING]
+> 本文包含使能、运动、I/O、限位和碰撞策略命令。不要在未确认真实机械臂状态和硬件急停的情况下复制执行。
+
+源码调度表保留了历史拼写 `SetLimitNegtive`；调用时必须使用该实际键名，不能写成
+`SetLimitNegative`。本文不擅自修改运行接口。
+
+## 常用命令定义
+
+```cpp
 /*
 函数功能描述:存储一个关节点位信息
 id - 存储点位id号,从1开始,注意该id与CARTPoint的点位id号各自独立
@@ -167,7 +191,7 @@ int SetRobotInstallAngle(double yangle,double zangle);
 函数功能描述:设置机器人碰撞等级
 float level1-level6 - 1-6轴的碰撞等级,范围是1-10
 */
-int SetAnticollision(float level1, float level2, float level3, float level4, float level5, folat level6);
+int SetAnticollision(float level1, float level2, float level3, float level4, float level5, float level6);
 例子：SetAnticollision(1,1,1,1,1,1)
 
 
@@ -194,8 +218,8 @@ int SetLimitPositive(float limit1, float limit2, float limit3, float limit4, flo
 函数功能描述:设置负限位,注意设置值必须在硬限位范围内
 float limit1-limit6 - 6个关节限位值
 */
-int SetLimitNegative(float limit1, float limit2, float limit3, float limit4, float limit5, float limit6);
-例子：SetLimitNegative(-100,-90,-90,-90,-90,-90)
+int SetLimitNegtive(float limit1, float limit2, float limit3, float limit4, float limit5, float limit6);
+例子：SetLimitNegtive(-100,-90,-90,-90,-90,-90)
 
 
 
@@ -219,7 +243,7 @@ int FrictionCompensationOnOff(uint8_t state);
 函数功能描述:设置关节摩擦力补偿系数-正装
 float coeff1-coeff6 - 6个关节补偿系数,范围是0-1
 */
-int SetFrictionValue_level(float coeff1,float coeff1,float coeff3,float coeff4,float coeff5,float coeff6);
+int SetFrictionValue_level(float coeff1,float coeff2,float coeff3,float coeff4,float coeff5,float coeff6);
 例子：SetFrictionValue_level(1,1,1,1,1,1)
 
 
@@ -228,7 +252,7 @@ int SetFrictionValue_level(float coeff1,float coeff1,float coeff3,float coeff4,f
 函数功能描述:设置关节摩擦力补偿系数-侧装
 float coeff1-coeff6 - 6个关节补偿系数,范围是0-1
 */
-int SetFrictionValue_wall(float coeff1,float coeff1,float coeff3,float coeff4,float coeff5,float coeff6);
+int SetFrictionValue_wall(float coeff1,float coeff2,float coeff3,float coeff4,float coeff5,float coeff6);
 例子：SetFrictionValue_wall(0.5,0.5,0.5,0.5,0.5,0.5)
 
 
@@ -237,7 +261,7 @@ int SetFrictionValue_wall(float coeff1,float coeff1,float coeff3,float coeff4,fl
 函数功能描述:设置关节摩擦力补偿系数-倒装
 float coeff1-coeff6 - 6个关节补偿系数,范围是0-1
 */
-int SetFrictionValue_ceiling(float coeff1,float coeff1,float coeff3,float coeff4,float coeff5,float coeff6);
+int SetFrictionValue_ceiling(float coeff1,float coeff2,float coeff3,float coeff4,float coeff5,float coeff6);
 例子：SetFrictionValue_ceiling(0.5,0.5,0.5,0.5,0.5,0.5)
 
 
@@ -312,7 +336,7 @@ uint8_t nb - 1-关节1(或x轴),2-关节2(或y轴),3-关节3(或z轴),4-关节4(
 uint8_t dir - 0-负方向, 1-正方向
 float vel - 速度百分比, 范围为0-100
 */
-int StartJOG(uint8_t ref, uin8_t nb, uint8_t dir, float vel);
+int StartJOG(uint8_t ref, uint8_t nb, uint8_t dir, float vel);
 例子：StartJOG(1,1,1,10)
 
 
@@ -434,3 +458,4 @@ int PointsOffsetEnable(int flag,double x,double y,double z,double rx,double ry,d
 函数功能描述:点位整体偏移结束
 */
 int PointsOffsetDisable();
+```

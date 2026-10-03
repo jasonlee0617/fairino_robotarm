@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import select
+import signal
 import sys
 import termios
 import time
@@ -17,11 +18,12 @@ def trajectory_event_for_command(command: str):
     return "stop" if command in ("stop", "reset") else None
 
 
-def motion_command_for_key(key: str) -> str:
+def motion_command_for_key(key: str, *, enable_grasp_trigger: bool = True) -> str:
     """Map the shared interactive safety keys to motion commands."""
-    return {" ": "stop", "g": "g", "h": "reset", "r": "resume"}.get(
-        str(key).lower(), ""
-    )
+    commands = {" ": "stop", "h": "reset", "r": "resume"}
+    if enable_grasp_trigger:
+        commands["g"] = "g"
+    return commands.get(str(key).lower(), "")
 
 
 class MotionControlNode(Node):
@@ -33,6 +35,9 @@ class MotionControlNode(Node):
         self.command_burst_count = int(self.declare_parameter("command_burst_count", 3).value)
         self.command_burst_period_sec = float(self.declare_parameter("command_burst_period_sec", 0.01).value)
         self.keyboard_poll_period_sec = float(self.declare_parameter("keyboard_poll_period_sec", 0.01).value)
+        self.enable_grasp_trigger_key = bool(
+            self.declare_parameter("enable_grasp_trigger_key", True).value
+        )
         self.command_sub = self.create_subscription(
             String, "/motion_control/command", self._relay_command, 10
         )
@@ -107,7 +112,9 @@ class MotionControlNode(Node):
             return
 
         ch = self.input_stream.read(1)
-        command = motion_command_for_key(ch)
+        command = motion_command_for_key(
+            ch, enable_grasp_trigger=self.enable_grasp_trigger_key
+        )
         if command:
             self._publish_command(command)
 
@@ -130,9 +137,15 @@ def main():
     n = MotionControlNode()
     try:
         rclpy.spin(n)
+    except KeyboardInterrupt:
+        pass
     finally:
-        n.destroy_node()
-        rclpy.shutdown()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            n.destroy_node()
+            rclpy.try_shutdown()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

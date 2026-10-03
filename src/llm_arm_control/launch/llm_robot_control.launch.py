@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""Real-hardware LLM Robot entry point with gated YOLO and GraspNet modes."""
+"""Real-hardware LLM Robot entry point with YOLO perception."""
 
 import os
-import shlex
 import sys
-from pathlib import Path
 
-from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
-    TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -23,20 +19,21 @@ from myrobot_common.launch_utils.yaml_loader import (
     launch_parameter_value,
     load_launch_parameters_yaml,
     load_node_parameters_yaml,
-    write_node_parameters_ros_file,
 )
+from llm_arm_control_nodes.voice_launch import build_voice_launch_actions
 
 _HANDEYE_LAUNCH_DIR = os.path.join(
     get_package_share_directory("hand_eye_calibration"), "launch"
 )
 if _HANDEYE_LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _HANDEYE_LAUNCH_DIR)
-from myrobot_common.camera.launch import camera_launch
+from myrobot_common.camera.launch import camera_launch  # noqa: E402
 from handeye_launch_utils import default_storage_directory, value  # noqa: E402
 
 
 _TASK_PARAMETERS = load_node_parameters_yaml(
-    "llm_arm_control", "config/llm_robot_control_params.yaml", "llm_control_task_server", "real"
+    "llm_arm_control", "config/llm_robot_control_params.yaml",
+    "llm_control_task_server", "real",
 )
 _LLM_PERCEPTION_PARAMETERS = load_node_parameters_yaml(
     "llm_arm_control", "config/llm_robot_control_params.yaml", "llm_visual_perception", "real"
@@ -61,6 +58,9 @@ _LAUNCH_FALLBACKS = {
     "capabilities": "",
     "disable_capabilities": "",
     "publish_frequency": "100.0",
+    "enable_voice": "true",
+    "audio_input_device": "auto",
+    "audio_input_volume_percent": "100",
     "rviz_config": os.path.join(
         get_package_share_directory("llm_arm_control"), "rviz", "llm_robot_control.rviz"
     ),
@@ -76,7 +76,7 @@ DEFAULTS.update(launch_defaults_as_strings({
 
 
 def _argument(name: str, default: str) -> DeclareLaunchArgument:
-    """创建启动参数，按名称添加可选值约束。"""
+    """Create a launch argument with optional choices."""
     kwargs = {"default_value": default, "description": name}
 
     if name == "camera_type":
@@ -91,37 +91,8 @@ def _public_task_parameters(context):
     }
 
 
-def _graspnet_inference_process(context):
-    """返回在 conda 环境中运行的 GraspNet 推理进程。"""
-    source_share = get_package_share_directory("graspnet_source")
-    install_setup = str(
-        Path(get_package_prefix("graspnet_bringup")).parent / "setup.bash"
-    )
-    profile = _YAML_LAUNCH_DEFAULTS["graspnet_model_profile"]
-
-    command = (
-        "set -e; "
-        f"source {shlex.quote(os.path.expanduser('~/miniconda3/etc/profile.d/conda.sh'))}; "
-        "conda activate graspnet; "
-        "source /opt/ros/humble/setup.bash; "
-        f"source {shlex.quote(install_setup)}; "
-        "export PYTHONUNBUFFERED=1 "
-        "MPLCONFIGDIR=/tmp/graspnet_mpl_config "
-        "XDG_CACHE_HOME=/tmp/graspnet_xdg_cache; "
-        "mkdir -p $MPLCONFIGDIR $XDG_CACHE_HOME; "
-        "exec python -m graspnet_bringup.graspnet_inference_node --ros-args "
-        f"--params-file {shlex.quote(write_node_parameters_ros_file('llm_arm_control', 'config/llm_robot_control_params.yaml', 'graspnet_inference', 'real'))} "
-        "-r __node:=graspnet_inference "
-        f"-p use_sim_time:={value(context, 'use_sim_time')} "
-        f"-p baseline_dir:={shlex.quote(os.path.join(source_share, 'graspnet_baseline'))} "
-        f"-p checkpoint_path:={shlex.quote(os.path.join(source_share, 'models', f'checkpoint-{profile}.tar'))}"
-    )
-
-    return [ExecuteProcess(cmd=["bash", "-lc", command], output="screen")]
-
-
 def _launch_setup(context):
-    """组装真实硬件启动描述。"""
+    """Assemble the real-hardware launch description."""
     task_params = dict(_TASK_PARAMETERS)
     task_params.update(_public_task_parameters(context))
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -199,79 +170,66 @@ def _launch_setup(context):
     )
 
     # YOLO 感知
-    yolo_obb = TimerAction(
-        period=8.0,
-        actions=[
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(
-                        get_package_share_directory("visual_perception"),
-                        "launch",
-                        "llm_visual_perception.launch.py",
-                    )
-                ),
-                launch_arguments={
-                    "use_sim_time": use_sim_time,
-                    "use_continuous_yolo": launch_defaults_as_strings(
-                        _LLM_PERCEPTION_PARAMETERS
-                    )["use_continuous_yolo"],
-                }.items(),
+    yolo_obb = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory("visual_perception"),
+                "launch",
+                "llm_visual_perception.launch.py",
             )
-        ],
-    )
-
-    # 机器人位姿监控
-    monitor = TimerAction(
-        period=8.0,
-        actions=[Node(
-            package="llm_arm_control",
-            executable="robot_pose_monitor_node",
-            output="screen",
-            parameters=[{"use_sim_time": use_sim_time}],
-        )],
+        ),
+        launch_arguments={
+            "use_sim_time": use_sim_time,
+            "require_cuda_for_visual_perception": launch_defaults_as_strings(
+                _LLM_PERCEPTION_PARAMETERS
+            )["require_cuda_for_visual_perception"],
+            "sync_slop": launch_defaults_as_strings(
+                _LLM_PERCEPTION_PARAMETERS
+            )["sync_slop"],
+            "sync_watchdog_sec": launch_defaults_as_strings(
+                _LLM_PERCEPTION_PARAMETERS
+            )["sync_watchdog_sec"],
+            "expected_camera_rate_hz": launch_defaults_as_strings(
+                _LLM_PERCEPTION_PARAMETERS
+            )["expected_camera_rate_hz"],
+        }.items(),
     )
 
     # LLM 任务服务器
-    task = TimerAction(
-        period=8.0,
-        actions=[
-            Node(
-                package="llm_arm_control",
-                executable="llm_control_task_server",
-                output="screen",
-                parameters=[
-                    task_params,
-                    {
-                        "use_sim_time": use_sim_time,
-                    },
-                ],
-            )
+    task = Node(
+        package="llm_arm_control",
+        executable="llm_control_task_server",
+        output="screen",
+        parameters=[
+            task_params,
+            {
+                "use_sim_time": use_sim_time,
+            },
         ],
     )
 
-    # 独立终端中的 CLI
-    cli = TimerAction(
-        period=8.0,
-        actions=[
-            ExecuteProcess(
-                cmd=[
-                    "gnome-terminal",
-                    "--title=LLM Robot CLI",
-                    "--wait",
-                    "--",
-                    "ros2",
-                    "run",
-                    "llm_arm_control",
-                    "llm_control_cli",
-                    "--ros-args",
-                    "-p",
-                    ["use_sim_time:=", use_sim_time],
-                    "-p",
-                    ["command_burst_count:=", str(_YAML_LAUNCH_DEFAULTS["command_burst_count"])],
-                ],
-                output="screen",
-            )
-        ],
+    # 保留本地 stop/reset/resume 安全控制；自然语言输入只由语音链提供。
+    motion_control = Node(
+        package="myrobot_common",
+        executable="motion_control",
+        name="motion_control",
+        output="screen",
+        parameters=[{
+            "use_sim_time": use_sim_time,
+            "command_burst_count": int(_YAML_LAUNCH_DEFAULTS["command_burst_count"]),
+            "enable_grasp_trigger_key": False,
+        }],
+    )
+
+    voice_actions = build_voice_launch_actions(
+        context,
+        environment="real",
+        enable_voice=LaunchConfiguration("enable_voice"),
+        audio_input_device=LaunchConfiguration("audio_input_device"),
+        audio_input_volume_percent=LaunchConfiguration(
+            "audio_input_volume_percent"
+        ),
+        use_sim_time=use_sim_time,
     )
 
     return [
@@ -280,15 +238,14 @@ def _launch_setup(context):
         handeye,
         retime,
         yolo_obb,
-        monitor,
         task,
-        OpaqueFunction(function=_graspnet_inference_process),
-        cli,
+        motion_control,
+        *voice_actions,
     ]
 
 
 def generate_launch_description():
-    """返回真实硬件 LLM 机器人的启动描述。"""
+    """Return the real-hardware LLM robot launch description."""
     launch_arguments = [
         _argument(name, default) for name, default in DEFAULTS.items()
     ]

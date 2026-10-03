@@ -1,8 +1,8 @@
-# motion_planning_demo_sim.launch.py 路径规划与 IK 对比 Demo 说明
+# 路径规划、IK 对比与 Benchmark
+
+[返回技术文档中心](../README.md)
 
 本文档说明唯一规划入口 `myrobot_simulation/launch/motion_planning_demo_sim.launch.py`。它以同一节点复用场景、MoveIt 与 IK 配置：`run_mode:=interactive` 提供终端规划/IK 对比；`run_mode:=goal_collection` 采集可复用目标集；`run_mode:=benchmark_execution` 运行完整 start -> goal -> start 闭环 benchmark；`run_mode:=benchmark_algorithm` 先到配置起点一次后仅统计规划算法结果，并在节点退出后关闭整套 launch。
-
-旧 benchmark 入口、节点与诊断脚本已删除，不保留兼容包装。
 
 ## 基准测试使用与归档
 

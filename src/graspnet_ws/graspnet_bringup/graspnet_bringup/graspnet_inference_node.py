@@ -17,7 +17,10 @@
 #   - open3d（可选，用于可视化）
 #   - graspnet-baseline 代码库
 # ---------------------------------------------------------------------------
+import json
+import signal
 import threading
+import time
 from typing import List, Optional, Tuple
 import numpy as np
 import rclpy
@@ -26,11 +29,13 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.duration import Duration
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Float32, Float32MultiArray, MultiArrayDimension
+from std_msgs.msg import Float32, Float32MultiArray, MultiArrayDimension, String
 from std_srvs.srv import Trigger
 from graspnet_bringup import inference_processing
 from graspnet_bringup import inference_runtime
@@ -38,6 +43,7 @@ from graspnet_bringup import inference_runtime
 # ═══════════════════════════════════════════════════════════
 #  工具函数
 # ═══════════════════════════════════════════════════════════
+
 
 def _graspnet_source_path(*parts: str) -> str:
     return inference_runtime.graspnet_source_path(*parts)
@@ -208,13 +214,23 @@ class GraspnetInferenceNode(Node):
         self.depth_min_m = float(self.get_parameter("depth_min_m").value)
         self.depth_max_m = float(self.get_parameter("depth_max_m").value)
 
-        self.confirm_before_publish = bool(self.get_parameter("confirm_before_publish").value) # 发布前需人工确认
-        self.confirm_visual_top_k = max(1, int(self.get_parameter("confirm_visual_top_k").value)) # 确认时可视化的候选数
+        # 发布前需人工确认。
+        self.confirm_before_publish = bool(
+            self.get_parameter("confirm_before_publish").value
+        )
+        # 确认时可视化的候选数。
+        self.confirm_visual_top_k = max(
+            1, int(self.get_parameter("confirm_visual_top_k").value)
+        )
         self.confirm_window_name = str(self.get_parameter("confirm_window_name").value)
 
         # 时间同步参数
         self.sync_queue = int(self.get_parameter("sync_queue_size").value)
         self.sync_slop = float(self.get_parameter("sync_slop_s").value)
+        self.active_mode = str(self.get_parameter("initial_mode").value).strip().lower()
+        self.rgbd_wait_timeout_sec = float(
+            self.get_parameter("rgbd_wait_timeout_sec").value
+        )
 
         # 随机数生成器
         self.rng = np.random.default_rng(int(self.get_parameter("random_seed").value))
@@ -233,7 +249,7 @@ class GraspnetInferenceNode(Node):
 
         # 设置设备（优先 GPU）
         self.device = self.torch.device("cuda:0" if self.torch.cuda.is_available() else "cpu")
-        self.net = self._load_net()
+        self.net = self._load_net() if self.active_mode == "graspnet" else None
 
         # CV Bridge（ROS ↔ OpenCV 图像转换）
         self.bridge = CvBridge()
@@ -241,9 +257,16 @@ class GraspnetInferenceNode(Node):
         # 线程锁：保护共享数据
         self._lock = threading.Lock()
         self._compute_lock = threading.Lock()  # 防止并发推理
+        self._preview_cache = None
+        self._preview_visualizer = None
+        self._preview_id = ""
         self._latest: Optional[Tuple[Image, Image, CameraInfo]] = None  # 最近一次同步数据
+        self._latest_received_at = 0.0
+        self._mode_enabled_at = time.monotonic()
         self._camera_info: Optional[CameraInfo] = None
         self.camera_info_sub = None
+        self.rgb_sub = self.depth_sub = self.ats = None
+        self._callback_group = ReentrantCallbackGroup()
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -258,10 +281,35 @@ class GraspnetInferenceNode(Node):
         self.metadata_pub = self.create_publisher(Float32MultiArray, self.metadata_topic, out_qos)
         self.preview_pose_pub = self.create_publisher(PoseStamped, self.preview_best_pose_topic, out_qos)
         self.preview_score_pub = self.create_publisher(Float32, self.preview_best_score_topic, out_qos)
+        self.preview_state_pub = self.create_publisher(
+            String, "/llm_control/graspnet_preview_state", 10
+        )
+        self.create_subscription(
+            String,
+            "/llm_control/graspnet_preview_control",
+            self._on_external_preview_control,
+            10,
+        )
+        self.create_timer(0.05, self._poll_external_preview)
 
         # 服务：/grasp/compute
-        self.create_service(Trigger, "/grasp/compute", self.on_compute)
-        self.create_service(Trigger, "/grasp/release_gpu", self.on_release_gpu)
+        self.create_service(
+            Trigger, "/grasp/compute", self.on_compute,
+            callback_group=self._callback_group,
+        )
+        self.create_service(
+            Trigger, "/grasp/release_gpu", self.on_release_gpu,
+            callback_group=self._callback_group,
+        )
+        mode_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(
+            String, "/llm_control/active_mode", self.on_active_mode, mode_qos,
+            callback_group=self._callback_group,
+        )
 
         # CameraInfo 不是图像帧：锁存规范内参，避免低频旧时间戳阻塞 RGB-D 缓存。
         self.camera_info_sub = self.create_subscription(
@@ -269,21 +317,18 @@ class GraspnetInferenceNode(Node):
             self.info_topic,
             self.on_camera_info,
             qos_profile_sensor_data,
+            callback_group=self._callback_group,
         )
 
-        # 仅同步实际采集的 RGB-D 图像对。
-        self.rgb_sub = Subscriber(self, Image, self.rgb_topic, qos_profile=qos_profile_sensor_data)
-        self.depth_sub = Subscriber(self, Image, self.depth_topic, qos_profile=qos_profile_sensor_data)
-        self.ats = ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub],
-            queue_size=self.sync_queue,
-            slop=self.sync_slop,
-        )
-        self.ats.registerCallback(self.on_synced)
+        if self.active_mode == "graspnet":
+            self._start_rgbd_subscriptions()
 
-        # 输出初始化信息
+        # 仅在 GraspNet 模式同步实际采集的 RGB-D 图像对。
+        self.get_logger().info(f"Initial GraspNet mode: {self.active_mode}")
         self.get_logger().info(f"GraspNet checkpoint: {self.checkpoint_path}")
-        self.get_logger().info(f"RGB/Depth/Info: {self.rgb_topic}, {self.depth_topic}, {self.info_topic}")
+        self.get_logger().info(
+            f"RGB/Depth/Info: {self.rgb_topic}, {self.depth_topic}, {self.info_topic}"
+        )
         self.get_logger().info(
             "Support-plane/workspace filtering enabled, "
             f"top_k_publish={self.top_k_publish}, "
@@ -293,6 +338,49 @@ class GraspnetInferenceNode(Node):
             f"Confirm before publish={self.confirm_before_publish}, "
             f"confirm_visual_top_k={self.confirm_visual_top_k}"
         )
+
+    def _start_rgbd_subscriptions(self):
+        if self.rgb_sub is not None:
+            return
+        self._latest = None
+        self._latest_received_at = 0.0
+        self._mode_enabled_at = time.monotonic()
+        self.rgb_sub = Subscriber(
+            self, Image, self.rgb_topic, qos_profile=qos_profile_sensor_data,
+            callback_group=self._callback_group,
+        )
+        self.depth_sub = Subscriber(
+            self, Image, self.depth_topic, qos_profile=qos_profile_sensor_data,
+            callback_group=self._callback_group,
+        )
+        self.ats = ApproximateTimeSynchronizer(
+            [self.rgb_sub, self.depth_sub],
+            queue_size=self.sync_queue,
+            slop=self.sync_slop,
+        )
+        self.ats.registerCallback(self.on_synced)
+
+    def _stop_rgbd_subscriptions(self):
+        for subscriber in (self.rgb_sub, self.depth_sub):
+            if subscriber is not None:
+                subscriber.unsubscribe()
+        self.rgb_sub = self.depth_sub = self.ats = None
+        with self._lock:
+            self._latest = None
+            self._latest_received_at = 0.0
+
+    def on_active_mode(self, msg):
+        mode = str(msg.data).strip().lower()
+        if mode not in ("yolo", "graspnet") or mode == self.active_mode:
+            return
+        self.active_mode = mode
+        if mode == "graspnet":
+            self._start_rgbd_subscriptions()
+        else:
+            self._stop_rgbd_subscriptions()
+            model, self.net = self.net, None
+            inference_runtime.release_model(self.torch, model)
+        self.get_logger().info(f"GraspNet input mode switched to {mode}")
 
     def _declare_defaults(self):
         """声明所有可配置参数的默认值（仅当参数尚未声明时）。"""
@@ -328,8 +416,10 @@ class GraspnetInferenceNode(Node):
             "min_valid_points": 2000,
             "depth_min_m": 0.05,
             "depth_max_m": 5.0,
-            "sync_queue_size": 10,
+            "sync_queue_size": 3,
             "sync_slop_s": 0.05,
+            "initial_mode": "graspnet",
+            "rgbd_wait_timeout_sec": 3.5,
             "confirm_before_publish": False,
             "confirm_visual_top_k": 50,
             "confirm_window_name": "GraspNet: E=execute, B=preview raw best, ESC/Q=cancel",
@@ -351,7 +441,7 @@ class GraspnetInferenceNode(Node):
             self.net = self._load_net()
 
     def on_release_gpu(self, _req: Trigger.Request, resp: Trigger.Response):
-        """Release only the GraspNet model; keep the RGB-D cache alive."""
+        """Release the GraspNet model and stop inactive RGB-D subscriptions."""
         if not self._compute_lock.acquire(blocking=False):
             resp.success = False
             resp.message = "GraspNet inference is already running."
@@ -359,12 +449,20 @@ class GraspnetInferenceNode(Node):
         try:
             model, self.net = self.net, None
             inference_runtime.release_model(self.torch, model)
+            if self.active_mode != "graspnet":
+                self._stop_rgbd_subscriptions()
             resp.success = True
             resp.message = "GraspNet GPU model released"
             self.get_logger().info(resp.message)
             return resp
         finally:
             self._compute_lock.release()
+
+    def destroy_node(self):
+        self._close_external_preview()
+        model, self.net = self.net, None
+        inference_runtime.release_model(self.torch, model)
+        super().destroy_node()
 
     # ═══════════════════════════════════════════════════════
     #  消息同步回调
@@ -400,6 +498,7 @@ class GraspnetInferenceNode(Node):
                 return
             info_msg = self._camera_info
             self._latest = (rgb_msg, depth_msg, info_msg)
+            self._latest_received_at = time.monotonic()
 
     # ═══════════════════════════════════════════════════════
     #  服务回调
@@ -415,9 +514,25 @@ class GraspnetInferenceNode(Node):
             resp.message = "GraspNet inference is already running."
             return resp
         try:
+            mode_deadline = time.monotonic() + 0.5
+            while self.active_mode != "graspnet" and time.monotonic() < mode_deadline:
+                time.sleep(0.02)
+            if self.active_mode != "graspnet":
+                resp.success = False
+                resp.message = "GraspNet mode is inactive."
+                return resp
             GraspnetInferenceNode._ensure_net_loaded(self)
-            with self._lock:
-                latest = self._latest
+            deadline = time.monotonic() + max(0.0, self.rgbd_wait_timeout_sec)
+            latest = None
+            while True:
+                with self._lock:
+                    if self._latest_received_at >= self._mode_enabled_at:
+                        latest = self._latest
+                if latest is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
             if latest is None:
                 resp.success = False
                 resp.message = "No CameraInfo latch and synchronized RGB/Depth received yet."
@@ -442,6 +557,9 @@ class GraspnetInferenceNode(Node):
             self.get_logger().error(resp.message)
             return resp
         finally:
+            torch = getattr(self, "torch", None)
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
             self._compute_lock.release()
 
     # ═══════════════════════════════════════════════════════
@@ -480,6 +598,13 @@ class GraspnetInferenceNode(Node):
         # 将 GraspGroup 转换为姿态和元数据
         poses_np, metadata = _graspgroup_to_pose_metadata(grasp_pub)
         self._publish_results(poses_np, metadata, frame_id, stamp)
+        self._preview_cache = {
+            "grasp_group": grasp_pub,
+            "debug_clouds": debug_clouds,
+            "frame_id": frame_id,
+            "stamp": stamp,
+            "capture_stamp": f"{int(stamp.sec)}.{int(stamp.nanosec):09d}",
+        }
         return int(poses_np.shape[0])
 
     def _generate_grasps(
@@ -499,7 +624,11 @@ class GraspnetInferenceNode(Node):
         返回: (全部抓取 GraspGroup, 发布的 top-k GraspGroup, Open3D 调试点云)
         """
         # 深度图转换为米（假设原始为毫米的 uint16）
-        depth_m = depth_raw.astype(np.float32) / 1000.0 if depth_raw.dtype == np.uint16 else depth_raw.astype(np.float32)
+        depth_m = (
+            depth_raw.astype(np.float32) / 1000.0
+            if depth_raw.dtype == np.uint16
+            else depth_raw.astype(np.float32)
+        )
         height, width = depth_m.shape[:2]
         # RGB 转为 [0,1] 浮点数
         color = rgb_bgr[..., ::-1].astype(np.float32) / 255.0
@@ -701,6 +830,106 @@ class GraspnetInferenceNode(Node):
         }
         return mask_flat.reshape(depth_mask.shape), workspace_points, debug_clouds, stats
 
+    def _publish_external_preview_state(self, state: str, error: str = ""):
+        self.preview_state_pub.publish(String(data=json.dumps({
+            "preview_id": self._preview_id,
+            "state": str(state),
+            "error": str(error),
+        }, ensure_ascii=False)))
+
+    def _close_external_preview(self, state="closed", error=""):
+        visualizer = self._preview_visualizer
+        if visualizer is not None:
+            try:
+                visualizer.destroy_window()
+            except Exception as exc:
+                self.get_logger().warning(f"Open3D preview close failed: {exc}")
+        self._preview_visualizer = None
+        if self._preview_id:
+            self._publish_external_preview_state(state, error)
+        self._preview_id = ""
+
+    def _on_external_preview_control(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        command = str(payload.get("command", ""))
+        if command == "close":
+            if not self._preview_id or payload.get("preview_id") == self._preview_id:
+                self._close_external_preview()
+            return
+        if command != "show":
+            return
+        preview_id = str(payload.get("preview_id", ""))
+        if not preview_id:
+            return
+        self._close_external_preview()
+        self._preview_id = preview_id
+        self._publish_external_preview_state("opening")
+        cache = self._preview_cache
+        if cache is None:
+            self._publish_external_preview_state("failed", "preview cache unavailable")
+            self._preview_id = ""
+            return
+        if str(payload.get("capture_stamp", "")) != cache["capture_stamp"]:
+            self._publish_external_preview_state("failed", "capture stamp mismatch")
+            self._preview_id = ""
+            return
+        index = int(payload.get("candidate_index", -1))
+        if index < 0 or index >= len(cache["grasp_group"]):
+            self._publish_external_preview_state("failed", "candidate index unavailable")
+            self._preview_id = ""
+            return
+        try:
+            import open3d as o3d
+
+            def cloud(points, color):
+                result = o3d.geometry.PointCloud()
+                result.points = o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float32))
+                result.paint_uniform_color(color)
+                return result.voxel_down_sample(voxel_size=0.005)
+
+            vis = o3d.visualization.Visualizer()
+            if not vis.create_window(
+                window_name="GraspNet selected executable grasp",
+                width=1280,
+                height=720,
+            ):
+                raise RuntimeError("failed to create Open3D window")
+            clouds = cache["debug_clouds"]
+            for geometry in (
+                cloud(clouds["raw"], (0.55, 0.55, 0.55)),
+                cloud(clouds["rejected"], (0.12, 0.12, 0.12)),
+                cloud(clouds["plane"], (1.0, 0.0, 0.0)),
+                cloud(clouds["final"], (0.0, 1.0, 0.0)),
+                o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1),
+            ):
+                vis.add_geometry(geometry)
+            gripper = cache["grasp_group"][index:index + 1].to_open3d_geometry_list()[0]
+            gripper.paint_uniform_color((0.0, 0.0, 1.0))
+            vis.add_geometry(gripper)
+            self._preview_visualizer = vis
+            self._publish_preview_best_pose(
+                cache["grasp_group"][index:index + 1], cache["frame_id"], cache["stamp"]
+            )
+            self._publish_external_preview_state("open")
+        except Exception as exc:
+            self.get_logger().error(f"Open3D external preview failed: {exc}")
+            self._close_external_preview("failed", str(exc))
+
+    def _poll_external_preview(self):
+        vis = self._preview_visualizer
+        if vis is None:
+            return
+        try:
+            if not vis.poll_events():
+                self._close_external_preview("closed")
+                return
+            vis.update_renderer()
+        except Exception as exc:
+            self._close_external_preview("failed", str(exc))
+
     def _confirm_grasps(self, grasp_group, debug_clouds, frame_id: str, stamp) -> bool:
         """
         交互式确认窗口：
@@ -871,11 +1100,20 @@ class GraspnetInferenceNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GraspnetInferenceNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)  # 阻塞直到节点退出
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            executor.shutdown(timeout_sec=2.0)
+            node.destroy_node()
+            rclpy.try_shutdown()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

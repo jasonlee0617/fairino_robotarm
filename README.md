@@ -1,38 +1,109 @@
 # Fairino Robot Arm
 
-这是 Fairino 六轴机械臂 ROS 2 工作区的项目入口：整合 `ROS 2 Humble`、`MoveIt 2`、Gazebo、自定义采样规划、RGB-D 感知、抓取、视觉伺服、LLM 任务控制、手眼标定与 MPC 动态避障。本文用于快速了解项目能力、观看演示和开始复现；详细实现说明请进入技术文档中心。
+这是一个面向 Fairino 六轴机械臂的 ROS 2 综合工作区，覆盖运动规划、Gazebo 仿真、RGB-D 感知、YOLO/GraspNet 抓取、视觉伺服、实时语音 LLM 控制、手眼标定和 MPC 动态避障。
 
-> 当前公开证据边界：本仓库优先展示代码、文档和 Gazebo 仿真流程。真实机械臂结果会在完成独立安全检查与录制后单独标注，不能由仿真画面替代。
+本文用于回答三个问题：仓库能做什么、各目录负责什么、第一次进入仓库应从哪里开始。实现原理、参数和故障排查请进入[技术文档中心](src/docs/README.md)。
 
-[技术文档](src/docs/README.md) · [演示录制与发布指南](src/docs/演示视频录制与发布指南.md) · [快速运行](#快速运行)
+> [!IMPORTANT]
+> 本仓库同时包含仿真、云端模型和真实机械臂相关代码。静态检查或单元测试通过，不等于 Gazebo、Qwen 云连接或真实机械臂已经完成验收。实机运行前必须独立检查急停、限位、速度、碰撞环境和工具安装。
 
-## 项目亮点
+## 能力概览
 
-| 能力 | 项目内容 | 当前公开证据 |
+| 能力 | 当前实现 | 从这里开始 |
 | --- | --- | --- |
-| 运动规划与 IK | Fairino 自定义 RRT 系列、MoveIt 规划管线、解析 IK 与诊断 | [规划说明](src/docs/simulation-and-planning/规划算法结构说明.md) |
-| 感知与抓取 | RGB-D、YOLO、GraspNet 和抓取执行链路 | [感知与抓取说明](src/docs/perception-and-grasping) |
-| LLM 任务控制 | 自然语言、目标消歧、预览确认与安全状态机 | [LLM 控制说明](src/docs/perception-and-grasping/llm-yolo-control.md) |
-| 标定与视觉伺服 | ArUco 手眼标定、Eye-in-Hand、Eye-on-Base、Gazebo 视觉伺服 | [手眼标定说明](src/docs/手眼标定/手眼标定文档说明.md) |
+| 运动规划与 IK | MoveIt 2、自定义 RRT 系列、Fairino/KDL IK、轨迹重定时 | [规划算法](src/docs/simulation-and-planning/规划算法结构说明.md) |
+| Gazebo 仿真 | 机器人、相机、控制器、规划场景和业务 Launch 统一编排 | [仿真架构](src/docs/simulation-and-planning/仿真环境架构说明.md) |
+| YOLO 视觉抓取 | RGB-D、OBB、TF、目标选择、抓放状态机 | [YOLO 视觉抓取](src/docs/perception-and-grasping/yolov8-visual-grasping.md) |
+| GraspNet 抓取 | 点云抓取候选、姿态选择、MoveIt 执行 | [GraspNet 仿真](src/docs/perception-and-grasping/graspnet-simulation.md) |
+| 视觉伺服 | PID、MPC、LADRC、NLADRC 位置伺服与状态机 | [位置伺服](src/docs/simulation-and-planning/visual-servo-simulation.md) |
+| LLM 任务控制 | 本地 KWS、Qwen Realtime、Function Calling、YOLO 场景绑定、安全 Preview 与 MoveIt 执行 | [LLM 控制](src/docs/perception-and-grasping/llm-yolo-control.md) |
+| 手眼标定 | 自动/半自动 Eye-in-Hand、半自动 Eye-on-Base | [手眼标定](src/docs/手眼标定/手眼标定文档说明.md) |
+| MPC 动态避障 | acados MPC/NMPC、轨迹跟踪、动态障碍与重规划通知 | [MPC 动态避障](src/docs/simulation-and-planning/mpc动态避障.md) |
 
-## 演示与证据
+## 演示视频
 
-下表链接至已发布的 Bilibili 演示视频。请结合“证据边界”理解演示结果：仿真、部署演示和真实机械臂结果不互相替代。
+下表只说明视频展示的场景，不把仿真或部署演示等同于真实机械臂验收。
 
-| 功能 | 演示说明 | 视频 | 证据边界 | 关联文档 |
-| --- | --- | --- | --- | --- |
-| MPC 动态避障 | MPC 在动态障碍场景中的避障规划与执行 | [观看视频](https://www.bilibili.com/video/BV1mmeE6QERY?vd_source=45556d309c289d529d67646995b5219f) | Gazebo 仿真 | [MPC 动态避障](src/docs/simulation-and-planning/mpc动态避障.md) |
-| 机械臂视觉伺服 | 视觉伺服落地部署流程演示 | [观看视频](https://www.bilibili.com/video/BV1zNeJ6gEYX?vd_source=45556d309c289d529d67646995b5219f) | 部署演示 | [视觉伺服](src/docs/simulation-and-planning/visual-servo-simulation.md) |
-| 机械臂视觉抓取 | 视觉感知、目标识别与抓取流程演示 | [观看视频](https://www.bilibili.com/video/BV1NUej65Emf?vd_source=45556d309c289d529d67646995b5219f) | 演示视频 | [YOLO 视觉抓取](src/docs/perception-and-grasping/yolov8-visual-grasping.md) |
-| LLM-DeepSeek 机械臂控制抓取 | 自然语言任务控制与抓取流程演示 | [观看视频](https://www.bilibili.com/video/BV1zNeJ6gEBw?vd_source=45556d309c289d529d67646995b5219f) | 演示视频 | [LLM 任务控制](src/docs/perception-and-grasping/llm-yolo-control.md) |
-| GraspNet 机械臂部署 | GraspNet 抓取在真实机械臂上的部署演示 | [观看视频](https://www.bilibili.com/video/BV1hQeV6yEfk?vd_source=45556d309c289d529d67646995b5219f) | 真实机械臂部署 | [GraspNet 抓取](src/docs/perception-and-grasping/graspnet-simulation.md) |
+| 功能 | 视频 | 证据边界 | 关联文档 |
+| --- | --- | --- | --- |
+| MPC 动态避障 | [观看视频](https://www.bilibili.com/video/BV1mmeE6QERY) | Gazebo 仿真 | [MPC 动态避障](src/docs/simulation-and-planning/mpc动态避障.md) |
+| 机械臂视觉伺服 | [观看视频](https://www.bilibili.com/video/BV1zNeJ6gEYX) | 部署演示 | [位置伺服](src/docs/simulation-and-planning/visual-servo-simulation.md) |
+| 机械臂视觉抓取 | [观看视频](https://www.bilibili.com/video/BV1NUej65Emf) | 演示视频 | [YOLO 视觉抓取](src/docs/perception-and-grasping/yolov8-visual-grasping.md) |
+| 指挥我的机械臂帮我干活！LLM-Control | [观看视频](https://www.bilibili.com/video/BV1Yeam6TEVo) | LLM-Control 演示 | [LLM 控制](src/docs/perception-and-grasping/llm-yolo-control.md) |
+| GraspNet 机械臂部署 | [观看视频](https://www.bilibili.com/video/BV1hQeV6yEfk) | 真实机械臂部署演示 | [GraspNet 抓取](src/docs/perception-and-grasping/graspnet-simulation.md) |
 
+## 环境与依赖
 
-## 文档与复现
+- Ubuntu 22.04 与 ROS 2 Humble；
+- MoveIt 2、ros2_control、Gazebo Fortress（Ignition）与 `ros_gz_bridge`；
+- Python 3、NumPy/SciPy、OpenCV，以及各功能包声明的 ROS 依赖；
+- 视觉功能需要对应相机、模型文件和标定结果；
+- LLM 语音功能还需要音频依赖、包内 KWS 模型和有效的 Qwen/DashScope 凭据；
+- GraspNet 与 MPC 分别有独立的深度学习环境和 acados/CasADi 依赖。
 
-- [工作区架构与包职责](src/docs/README.md)
-- [仿真与规划](src/docs/simulation-and-planning/)
-- [感知、抓取与 LLM 控制](src/docs/perception-and-grasping/)
-- [手眼标定](src/docs/手眼标定/)
-- [MPC 动态避障](src/docs/simulation-and-planning/mpc动态避障.md)
+仓库包含多个上游组件和本地模型资产，不能假设一次通用 `rosdep` 命令即可配置所有外部运行时。首次复现前请先阅读目标功能的专题文档。
 
+## 快速运行
+
+在工作区根目录执行：
+
+```bash
+source /opt/ros/humble/setup.bash
+./run_build.sh
+source install/setup.bash
+ros2 launch myrobot_simulation gazebo.launch.py
+```
+
+`run_build.sh` 按本机工作区策略跳过相机驱动、`realsense2_gz_description` 和 `fairino_hardware`。首次克隆的环境必须先安装或单独构建这些依赖；不要把脚本完成等同于全部硬件依赖已经就绪。
+
+常用业务入口：
+
+```bash
+# 路径规划与 IK 对比
+ros2 launch myrobot_simulation motion_planning_demo_sim.launch.py
+
+# YOLO 视觉抓取仿真
+ros2 launch myrobot_simulation visual_grasping_sim.launch.py
+
+# 位置视觉伺服仿真
+ros2 launch myrobot_simulation visual_position_servo_sim.launch.py
+
+# LLM 实时语音控制仿真
+ros2 launch myrobot_simulation llm_robot_control_sim.launch.py
+```
+
+真实机械臂、GraspNet、手眼标定和 MPC 的依赖与安全条件不同，请使用对应专题文档中的入口，不要直接照搬仿真命令。
+
+## 目录结构
+
+```text
+fairino_robotarm/
+├── src/docs/                         # 技术文档中心
+├── src/myrobot_planning_core/        # ROS 无关的规划与解析 IK 核心
+├── src/myrobot_planning_ros/         # MoveIt 规划器与 IK 插件
+├── src/myrobot_common_ws/            # 运动、感知、取消与轨迹公共能力
+├── src/myrobot_simulation/           # Gazebo 与业务仿真入口
+├── src/visual_perception/            # YOLO RGB-D 感知
+├── src/visual_grasping_bringup/      # YOLO 抓放状态机
+├── src/visual_servo_bringup/         # 图像/位置视觉伺服
+├── src/llm_arm_control/              # KWS、Qwen 与受限任务执行
+├── src/graspnet_ws/                  # GraspNet 推理与执行
+├── src/calibration_ws/               # ArUco 与手眼标定
+├── src/camera_ws/                    # RealSense/OAK 驱动和仿真描述
+├── src/myrobot_mpc_ws/               # MPC/NMPC 动态避障
+└── src/myrobot_support_ws/           # Fairino 模型、MoveIt 配置和硬件接口
+```
+
+## 阅读路线
+
+1. [技术文档中心](src/docs/README.md)：先建立工作区全貌。
+2. [仿真环境架构](src/docs/simulation-and-planning/仿真环境架构说明.md)：理解 Gazebo、MoveIt 和业务 Launch 的关系。
+3. 按目标选择[规划](src/docs/simulation-and-planning/planning-demo.md)、[抓取](src/docs/perception-and-grasping/yolov8-visual-grasping.md)、[LLM](src/docs/perception-and-grasping/llm-yolo-control.md)或[标定](src/docs/手眼标定/手眼标定文档说明.md)专题。
+4. 完成静态配置和仿真检查后，再进入真实机械臂流程。
+
+## 安全与公开边界
+
+- 软件停止、Action 取消或状态机锁存不是安全等级急停；实机必须具备独立硬件安全链路。
+- 仓库根目录目前没有统一许可证；各包和第三方组件按各自声明管理，不能据此推定整个仓库可按同一许可证再分发。
+- KWS、YOLO、GraspNet 等模型可能具有独立许可或非商业限制，提交或再分发前必须单独核验。
+- API 凭据、设备序列号、个人路径、标定结果和运行日志不应直接提交到公开仓库。

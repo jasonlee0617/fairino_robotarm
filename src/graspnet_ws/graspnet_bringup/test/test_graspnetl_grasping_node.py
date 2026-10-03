@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
 import threading
 import types
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import numpy as np
@@ -103,11 +105,65 @@ class FakeLogger:
 
 
 class GraspnetVisualGraspingNodeTest(unittest.TestCase):
+    def test_external_preview_publishes_opening_before_cache_failure(self):
+        events = []
+        node = SimpleNamespace(
+            _preview_visualizer=None,
+            _preview_id="",
+            _preview_cache=None,
+            preview_state_pub=FakePublisher("state", events),
+            get_logger=lambda: FakeLogger(),
+        )
+        node._publish_external_preview_state = lambda state, error="": (
+            GraspnetInferenceNode._publish_external_preview_state(node, state, error)
+        )
+        node._close_external_preview = lambda state="closed", error="": (
+            GraspnetInferenceNode._close_external_preview(node, state, error)
+        )
+
+        GraspnetInferenceNode._on_external_preview_control(
+            node,
+            SimpleNamespace(data=json.dumps({"command": "show", "preview_id": "p1"})),
+        )
+
+        states = [json.loads(message.data)["state"] for _, message in events]
+        self.assertEqual(states, ["opening", "failed"])
+
+    def test_external_preview_close_is_nonblocking_and_published_once(self):
+        events = []
+        visualizer = SimpleNamespace(
+            poll_events=lambda: False,
+            update_renderer=lambda: self.fail("closed window must not render"),
+            destroy_window=lambda: events.append(("destroy", None)),
+        )
+        node = SimpleNamespace(
+            _preview_visualizer=visualizer,
+            _preview_id="preview",
+            preview_state_pub=FakePublisher("state", events),
+            get_logger=lambda: FakeLogger(),
+        )
+        node._publish_external_preview_state = lambda state, error="": (
+            GraspnetInferenceNode._publish_external_preview_state(node, state, error)
+        )
+        node._close_external_preview = lambda state="closed", error="": (
+            GraspnetInferenceNode._close_external_preview(node, state, error)
+        )
+
+        GraspnetInferenceNode._poll_external_preview(node)
+        GraspnetInferenceNode._poll_external_preview(node)
+
+        self.assertEqual(events[0], ("destroy", None))
+        self.assertEqual(json.loads(events[1][1].data), {
+            "preview_id": "preview", "state": "closed", "error": ""
+        })
+        self.assertEqual(len(events), 2)
+
     def test_release_gpu_clears_model_and_compute_reloads_it(self):
         logger = FakeLogger()
         node = SimpleNamespace(
             _compute_lock=threading.Lock(),
             net=object(),
+            active_mode="graspnet",
             torch=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
             get_logger=lambda: logger,
         )
@@ -123,10 +179,19 @@ class GraspnetVisualGraspingNodeTest(unittest.TestCase):
 
     def test_compute_reports_confirmation_cancel_explicitly(self):
         logger = FakeLogger()
+        cache_releases = []
         node = SimpleNamespace(
             _compute_lock=threading.Lock(),
             _lock=threading.Lock(),
             net=object(),
+            active_mode="graspnet",
+            _mode_enabled_at=0.0,
+            _latest_received_at=1.0,
+            rgbd_wait_timeout_sec=0.0,
+            torch=SimpleNamespace(cuda=SimpleNamespace(
+                is_available=lambda: True,
+                empty_cache=lambda: cache_releases.append(True),
+            )),
             _latest=(object(), object(), object()),
             _infer_and_publish=lambda *_args: (_ for _ in ()).throw(
                 RuntimeError("Grasp confirmation canceled by user.")
@@ -139,6 +204,7 @@ class GraspnetVisualGraspingNodeTest(unittest.TestCase):
         self.assertFalse(response.success)
         self.assertEqual(response.message, "CANCELED: Grasp confirmation canceled by user.")
         self.assertEqual(logger.messages, [("info", response.message)])
+        self.assertEqual(cache_releases, [True])
 
     def test_wait_ready_moves_directly_to_pregrasp_pose(self):
         states = []
@@ -732,6 +798,31 @@ class GraspnetVisualGraspingNodeTest(unittest.TestCase):
         for value, expected_value in zip(events[1][1].data, [0.9, 0.04, 0.02]):
             self.assertAlmostEqual(value, expected_value)
         self.assertEqual(len(events[2][1].poses), 1)
+
+    def test_inference_mode_gates_rgbd_subscriptions_and_model(self):
+        events = []
+        node = SimpleNamespace(
+            active_mode="yolo",
+            net=None,
+            torch=object(),
+            _start_rgbd_subscriptions=lambda: events.append("start_rgbd"),
+            _stop_rgbd_subscriptions=lambda: events.append("stop_rgbd"),
+            get_logger=lambda: SimpleNamespace(info=lambda *_args: None),
+        )
+        GraspnetInferenceNode.on_active_mode(node, SimpleNamespace(data="graspnet"))
+        self.assertEqual(node.active_mode, "graspnet")
+        self.assertEqual(events, ["start_rgbd"])
+
+        events.clear()
+        node.net = object()
+        with patch(
+            "graspnet_bringup.graspnet_inference_node.inference_runtime.release_model"
+        ) as release:
+            GraspnetInferenceNode.on_active_mode(node, SimpleNamespace(data="yolo"))
+        self.assertEqual(node.active_mode, "yolo")
+        self.assertEqual(events, ["stop_rgbd"])
+        self.assertIsNone(node.net)
+        release.assert_called_once()
 
 
 if __name__ == "__main__":

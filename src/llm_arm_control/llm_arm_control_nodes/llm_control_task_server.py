@@ -1,97 +1,68 @@
 #!/usr/bin/env python3
-"""Central DeepSeek, YOLO RGB-D, and robot task server."""
+"""Local Qwen tool boundary, YOLO RGB-D planner, and robot task server."""
 
 from __future__ import annotations
 
 import json
-import math
+import signal
 import threading
 import time
 import uuid
 
-from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from llm_arm_control.action import ExecutePreview
-from llm_arm_control.srv import PreviewCommand
+from llm_arm_control.srv import AgentCommand
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
-from rclpy.duration import Duration
-from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.time import Time
-from scipy.spatial.transform import Rotation
-from std_msgs.msg import Float32MultiArray, String
-from std_srvs.srv import SetBool, Trigger
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
+from rclpy.signals import SignalHandlerOptions
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 import tf2_ros
 
-from llm_arm_control_nodes.deepseek_client import DeepSeekClient
-from llm_arm_control_nodes.deepseek_credentials import get_deepseek_api_key
-from llm_arm_control_nodes.robot_pose_control_server import RobotPoseControlServer
-from visual_perception_nodes.llm_visual_perception import (
+from llm_arm_control_nodes.robot_motion_base import RobotMotionBase
+from llm_arm_control_nodes.agent_protocol import AGENT_TOOLS, parse_agent_tool_call
+from visual_perception_utils.llm_rgbd import (
     PerceptionUnavailable,
     RgbdPerception,
 )
 from llm_arm_control_nodes.task_logic import (
-    ClarificationRequired,
-    DetectionCandidate,
+    PreviewFailure,
+    PreviewRecord,
     SafetyState,
-    SYSTEM_PROMPT,
-    TaskPlan,
-    TaskPreview,
+    TaskContext,
+    invocation_spoken_text,
     apply_safety_command,
-    build_semantic_history,
     complete_safety_reset,
-    deterministic_visual_plan,
     execution_step_count,
-    instruction_has_visual_intent,
-    parse_llm_plan,
     preview_status,
     safety_execution_valid,
-    validate_plan_intent,
-    validate_visual_state,
+    spoken_error_text,
 )
 from llm_arm_control_nodes.task.llm_control_state_machine import (
     LlmControlTaskState,
     LlmControlTaskStateMachine,
-    LlmGraspnetState,
-    LlmGraspnetStateMachine,
 )
-from graspnet_bringup.task.graspnet_candidate_utils import (
-    build_candidates,
-    prepare_candidate,
-)
-from graspnet_bringup.task.candidate_ros import pose_to_base
-from llm_arm_control_nodes.task.preview_store import PreviewRecord, clear_session, prune, take
+from llm_arm_control_nodes.task.visual_task_planner import VisualTaskPlannerMixin
 
 
-class LlmControlTaskServer(RobotPoseControlServer):
+class LlmControlTaskServer(VisualTaskPlannerMixin, RobotMotionBase):
     def __init__(self):
         super().__init__("llm_control_task_server")
         self._declare_task_parameters()
         self._read_task_parameters()
         self._lock = threading.RLock()
+        self._command_lock = threading.Lock()
         self._previews: dict[str, PreviewRecord] = {}
-        self._sessions: dict[str, list[dict]] = {}
-        self._client = None
-        self._client_key = None
+        self._task_contexts: dict[str, TaskContext] = {}
+        self._tool_results = {}
         self._state = LlmControlTaskState.PREGRASP_POSE.value
         self._safety = SafetyState()
-        self.active_mode = "yolo"
-        self._graspnet_state = LlmGraspnetState.WAIT_G.value
-        self._graspnet_g_requested = False
-        self._graspnet_compute_cancelled = False
-        self._graspnet_last_error = ""
-        self._mode_switch_error = ""
-        self._mode_switch_active = False
-        self._graspnet_result_lock = threading.RLock()
-        self._graspnet_poses = None
-        self._graspnet_scores = []
-        self._graspnet_metadata = []
-        self._graspnet_seq = 0
-        self._graspnet_start_seq = 0
-        self._graspnet_candidate = None
+        self._visual_available = True
+        self._visual_last_error = ""
         self._execution_active = False
         self._reset_failed = False
         self._held_source = None
+        self._shutting_down = False
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -105,41 +76,14 @@ class LlmControlTaskServer(RobotPoseControlServer):
             rgb_depth_tolerance_sec=self.rgb_depth_tolerance_sec,
             detection_max_age_sec=self.detection_max_age_sec,
             vision_wait_timeout_sec=self.vision_wait_timeout_sec,
+            tf_wait_timeout_sec=self.tf_wait_timeout_sec,
             callback_group=self.callback_group,
         )
         self.abort.set_command_hook(self._advance_safety)
-        self.abort.set_command_enabled(lambda: self.active_mode in ("yolo", "graspnet"))
-        mode_qos = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        self.abort.set_command_enabled(lambda: True)
+        self.llm_yolo_status_client = self.create_client(
+            Trigger, "/llm_visual_perception/status", callback_group=self.callback_group
         )
-        self.create_subscription(
-            String, "/llm_control/active_mode", self._on_active_mode, mode_qos,
-            callback_group=self.callback_group,
-        )
-        self.create_subscription(
-            String, "/motion_control/command", self._on_llm_motion_command, 10,
-            callback_group=self.callback_group,
-        )
-        self.graspnet_compute_client = self.create_client(
-            Trigger, "/grasp/compute", callback_group=self.callback_group
-        )
-        self.llm_yolo_inference_client = self.create_client(
-            SetBool, "/llm_visual_perception/set_inference_enabled", callback_group=self.callback_group
-        )
-        self.llm_yolo_release_gpu_client = self.create_client(
-            Trigger, "/llm_visual_perception/release_gpu", callback_group=self.callback_group
-        )
-        self.graspnet_release_gpu_client = self.create_client(
-            Trigger, "/grasp/release_gpu", callback_group=self.callback_group
-        )
-        self.create_subscription(PoseArray, self.graspnet_poses_topic, self._on_graspnet_poses, 10,
-                                 callback_group=self.callback_group)
-        self.create_subscription(Float32MultiArray, self.graspnet_scores_topic, self._on_graspnet_scores, 10,
-                                 callback_group=self.callback_group)
-        self.create_subscription(Float32MultiArray, self.graspnet_metadata_topic, self._on_graspnet_metadata, 10,
-                                 callback_group=self.callback_group)
         self.clear_session_subscription = self.create_subscription(
             String,
             "/llm_control/clear_session",
@@ -147,10 +91,10 @@ class LlmControlTaskServer(RobotPoseControlServer):
             10,
             callback_group=self.callback_group,
         )
-        self.preview_service = self.create_service(
-            PreviewCommand,
-            "/llm_control/preview_command",
-            self._preview_command,
+        self.agent_service = self.create_service(
+            AgentCommand,
+            "/llm_control/agent_command",
+            self._agent_command,
             callback_group=self.callback_group,
         )
         self.status_service = self.create_service(
@@ -174,12 +118,11 @@ class LlmControlTaskServer(RobotPoseControlServer):
             stop_timeout_sec=self.reset_stop_timeout_sec,
         )
         self._state_machine = LlmControlTaskStateMachine(self)
-        self._graspnet_state_machine = LlmGraspnetStateMachine(self)
         self._pregrasp_timer = self.create_timer(
             0.2, self._tick_state_machines, callback_group=self.callback_group
         )
         self.get_logger().info(
-            "LLM control task server ready: /llm_control/preview_command, /llm_control/execute_preview"
+            "Robot agent boundary ready: /llm_control/agent_command, /llm_control/execute_preview"
         )
 
     def _declare_task_parameters(self):
@@ -190,7 +133,8 @@ class LlmControlTaskServer(RobotPoseControlServer):
             "preview_max_age_sec": 15.0,
             "detection_max_age_sec": 1.0,
             "rgb_depth_tolerance_sec": 0.05,
-            "vision_wait_timeout_sec": 15.0,
+            "vision_wait_timeout_sec": 3.5,
+            "tf_wait_timeout_sec": 0.6,
             "pick_classes": ["elongated_object", "cube", "stone"],
             "place_classes": ["box"],
             "workspace_min_xy": [-0.9, -0.9],
@@ -215,27 +159,18 @@ class LlmControlTaskServer(RobotPoseControlServer):
             "grasp.stone.pitch": -180.0,
             "grasp.stone.yaw_offset": -45.0,
             "reset_stop_timeout_sec": 5.0,
-            "deepseek_base_url": "https://api.deepseek.com",
-            "deepseek_model": "deepseek-chat",
-            "deepseek_timeout_sec": 30.0,
-            "use_continuous_yolo": True,
-            "graspnet_poses_topic": "/grasp/poses",
-            "graspnet_scores_topic": "/grasp/scores",
-            "graspnet_metadata_topic": "/grasp/metadata",
-            "graspnet_max_candidates": 50,
-            "graspnet_approach_distance_m": 0.08,
-            "graspnet_grasp_offset_m": -0.01,
-            "graspnet_lift_distance": 0.08,
-            "graspnet_to_ee_rpy_deg": [90.0, 0.0, 90.0],
-            "graspnet_use_width": False,
-            "graspnet_result_timeout_sec": 8.0,
-            "graspnet_compute_timeout_sec": 600.0,
+            "batch_box_zone_radius_m": 0.08,
+            "batch_rebind_max_distance_m": 0.10,
+            "batch_rebind_timeout_sec": 5.0,
+            "batch_rebind_stable_frames": 2,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
 
     def _read_task_parameters(self):
-        value = lambda name: self.get_parameter(name).value
+        def value(name):
+            return self.get_parameter(name).value
+
         self.yolo_topic = str(value("yolo_topic"))
         self.depth_topic = str(value("depth_topic"))
         self.camera_info_topic = str(value("camera_info_topic"))
@@ -243,13 +178,17 @@ class LlmControlTaskServer(RobotPoseControlServer):
         self.detection_max_age_sec = float(value("detection_max_age_sec"))
         self.rgb_depth_tolerance_sec = float(value("rgb_depth_tolerance_sec"))
         self.vision_wait_timeout_sec = float(value("vision_wait_timeout_sec"))
+        self.tf_wait_timeout_sec = float(value("tf_wait_timeout_sec"))
         self.pick_classes = frozenset(str(item) for item in value("pick_classes"))
         self.place_classes = frozenset(str(item) for item in value("place_classes"))
         self.workspace_min_xy = tuple(float(item) for item in value("workspace_min_xy"))
         self.workspace_max_xy = tuple(float(item) for item in value("workspace_max_xy"))
         if len(self.workspace_min_xy) != 2 or len(self.workspace_max_xy) != 2:
             raise ValueError("workspace XY bounds must each contain exactly two values")
-        if any(lower > upper for lower, upper in zip(self.workspace_min_xy, self.workspace_max_xy)):
+        if any(
+            lower > upper
+            for lower, upper in zip(self.workspace_min_xy, self.workspace_max_xy)
+        ):
             raise ValueError("workspace XY lower bounds must not exceed upper bounds")
         self.pregrasp_pose_cfg = {
             axis: float(value(f"pregrasp_pose.{axis}"))
@@ -258,7 +197,7 @@ class LlmControlTaskServer(RobotPoseControlServer):
         self.pregrasp_pose = self._build_pregrasp_pose()
         for name in (
             "grasp_above", "grasp_offset", "place_offset", "descend_to_box",
-            "reset_stop_timeout_sec", "deepseek_timeout_sec",
+            "reset_stop_timeout_sec",
         ):
             setattr(self, name, float(value(name)))
         self.grasp_profiles = {
@@ -266,61 +205,22 @@ class LlmControlTaskServer(RobotPoseControlServer):
                         for axis in ("roll", "pitch", "yaw_offset"))
             for name in ("elongated_object", "cube", "stone")
         }
-        self.deepseek_base_url = str(value("deepseek_base_url"))
-        self.deepseek_model = str(value("deepseek_model"))
-        self.use_continuous_yolo = bool(value("use_continuous_yolo"))
-        self.graspnet_poses_topic = str(value("graspnet_poses_topic"))
-        self.graspnet_scores_topic = str(value("graspnet_scores_topic"))
-        self.graspnet_metadata_topic = str(value("graspnet_metadata_topic"))
-        self.graspnet_max_candidates = int(value("graspnet_max_candidates"))
-        self.graspnet_approach_distance_m = float(value("graspnet_approach_distance_m"))
-        self.graspnet_grasp_offset_m = float(value("graspnet_grasp_offset_m"))
-        self.graspnet_lift_distance = float(value("graspnet_lift_distance"))
-        self.graspnet_to_ee_rpy_deg = tuple(float(v) for v in value("graspnet_to_ee_rpy_deg"))
-        self.graspnet_use_width = bool(value("graspnet_use_width"))
-        self.graspnet_result_timeout_sec = float(value("graspnet_result_timeout_sec"))
-        self.graspnet_compute_timeout_sec = float(value("graspnet_compute_timeout_sec"))
+        self.batch_box_zone_radius_m = float(value("batch_box_zone_radius_m"))
+        self.batch_rebind_max_distance_m = float(value("batch_rebind_max_distance_m"))
+        self.batch_rebind_timeout_sec = float(value("batch_rebind_timeout_sec"))
+        self.batch_rebind_stable_frames = max(
+            1, int(value("batch_rebind_stable_frames"))
+        )
 
     def _tick_state_machines(self):
         self._state_machine.tick()
-        self._graspnet_state_machine.tick()
-
-    def _on_graspnet_poses(self, msg):
-        with self._graspnet_result_lock:
-            self._graspnet_poses = msg
-            self._graspnet_seq += 1
-
-    def _on_graspnet_scores(self, msg):
-        with self._graspnet_result_lock:
-            self._graspnet_scores = [float(value) for value in msg.data]
-
-    def _on_graspnet_metadata(self, msg):
-        with self._graspnet_result_lock:
-            self._graspnet_metadata = [float(value) for value in msg.data]
 
     def _advance_safety(self, command):
         command = str(command).strip().lower()
-        if command == "g":
-            with self._lock:
-                accepted = (
-                    self.active_mode == "graspnet"
-                    and self._graspnet_state == LlmGraspnetState.WAIT_G.value
-                    and getattr(self, "_held_source", None) is None
-                )
-                if accepted:
-                    self._graspnet_g_requested = False
-                    self._graspnet_state = LlmGraspnetState.COMPUTE.value
-                    return
-                holding = getattr(self, "_held_source", None) is not None
-            if holding:
-                self.get_logger().warning("Ignoring GraspNet request while an object is held.")
-            return
-        if getattr(self, "active_mode", "yolo") not in ("yolo", "graspnet"):
-            return
-        if command in ("stop", "reset"):
-            self._set_llm_yolo_inference(False)
-            self._graspnet_g_requested = False
         with self._lock:
+            if command in ("stop", "reset"):
+                for context_session in tuple(self._task_contexts):
+                    self._clear_task_context_locked(context_session)
             if command in ("reset", "resume"):
                 self._reset_failed = False
             updated = apply_safety_command(self._safety, command)
@@ -336,225 +236,23 @@ class LlmControlTaskServer(RobotPoseControlServer):
                     if not self._execution_active:
                         self._state = self._resting_state_locked()
 
-    def _on_llm_motion_command(self, msg):
-        if str(msg.data).strip().lower() == "g":
-            self._advance_safety("g")
-
-    def _on_active_mode(self, msg):
-        mode = str(msg.data).strip().lower()
-        if mode not in ("yolo", "graspnet"):
-            return
-        with self._lock:
-            if self._execution_active:
-                self.get_logger().warning("Ignoring mode switch while LLM task is executing.")
-                return
-            if mode == "graspnet" and self._state not in (
-                LlmControlTaskState.IDLE.value,
-                LlmControlTaskState.HOLDING.value,
-            ):
-                self.get_logger().warning("Ignoring GraspNet mode entry outside LLM IDLE/HOLDING.")
-                return
-            if mode == "yolo" and self._graspnet_state != LlmGraspnetState.WAIT_G.value:
-                self.get_logger().warning("Ignoring YOLO mode entry outside LLM GraspNet WAIT_G.")
-                return
-            if mode == self.active_mode:
-                return
-            if getattr(self, "_mode_switch_active", False):
-                self.get_logger().warning("Ignoring duplicate LLM mode switch request.")
-                return
-            self._mode_switch_active = True
-            self._mode_switch_error = ""
-        try:
-            if mode == "graspnet":
-                if not self._set_llm_yolo_inference(False, force=True):
-                    self._record_mode_switch_error("Failed to stop LLM YOLO inference before GraspNet mode.")
-                    return
-                if not self._release_llm_yolo_gpu():
-                    self._record_mode_switch_error("Failed to release LLM YOLO GPU memory before GraspNet mode.")
-                    return
-            else:
-                if not self._release_graspnet_gpu():
-                    self._record_mode_switch_error("Failed to release GraspNet GPU memory before YOLO mode.")
-                    return
-                if not self._set_llm_yolo_inference(True, force=True):
-                    self._record_mode_switch_error("Failed to reload LLM YOLO before YOLO mode.")
-                    return
-            with self._lock:
-                if self._execution_active:
-                    self._record_mode_switch_error("Mode switch was superseded by an active task.")
-                    return
-                self.active_mode = mode
-                self._mode_switch_error = ""
-                self._previews.clear()
-                self._graspnet_g_requested = False
-                if mode == "graspnet":
-                    self._graspnet_reset()
-                    self._graspnet_state = LlmGraspnetState.WAIT_G.value
-                if mode == "yolo" and self._state != LlmControlTaskState.PREGRASP_POSE.value:
-                    self._state = self._resting_state_locked()
-            self.get_logger().info(f"LLM mode switched to {mode}.")
-        finally:
-            with self._lock:
-                self._mode_switch_active = False
-
-    def _record_mode_switch_error(self, message: str):
-        with self._lock:
-            self._mode_switch_error = message
-        self.get_logger().error(message)
-
-    def _set_llm_yolo_inference(self, enabled: bool, *, force: bool = False) -> bool:
-        if self.use_continuous_yolo and not force:
-            return True
-        client = self.llm_yolo_inference_client
-        if not client.wait_for_service(timeout_sec=5.0):
+    def _refresh_yolo_health(self) -> bool:
+        health = getattr(self, "llm_yolo_status_client", None)
+        if health is None or not health.service_is_ready():
+            self._visual_available = False
+            self._visual_last_error = "YOLO status service is unavailable"
             return False
-        future = client.call_async(SetBool.Request(data=bool(enabled)))
-        deadline = time.monotonic() + 5.0
+        future = health.call_async(Trigger.Request())
+        deadline = time.monotonic() + 1.0
         while rclpy.ok() and not future.done() and time.monotonic() < deadline:
             time.sleep(0.01)
         response = future.result() if future.done() else None
-        if response is not None and response.success:
-            self.perception.clear_frames()
-            return True
-        return False
-
-    def _call_trigger(self, client, timeout_sec=60.0) -> bool:
-        if not client.wait_for_service(timeout_sec=5.0):
-            return False
-        future = client.call_async(Trigger.Request())
-        deadline = time.monotonic() + timeout_sec
-        while rclpy.ok() and not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        response = future.result() if future.done() else None
-        return bool(response is not None and response.success)
-
-    def _release_llm_yolo_gpu(self) -> bool:
-        return self._call_trigger(self.llm_yolo_release_gpu_client)
-
-    def _release_graspnet_gpu(self) -> bool:
-        return self._call_trigger(self.graspnet_release_gpu_client)
-
-    def _graspnet_reset(self):
-        self._graspnet_g_requested = False
-        self._graspnet_compute_cancelled = False
-        self._graspnet_candidate = None
-        self._graspnet_candidates = None
-
-    def _graspnet_motion_failed(self, reason: str):
-        self._graspnet_last_error = f"GraspNet motion failed: {reason}"
-        self.get_logger().error(
-            f"{self._graspnet_last_error}; stopped. Press h for one pregrasp reset."
+        self._visual_available = bool(response is not None and response.success)
+        self._visual_last_error = (
+            "" if self._visual_available
+            else str(getattr(response, "message", "YOLO status request timed out"))
         )
-        self._stop_for_motion_failure(self._graspnet_last_error)
-
-    def _graspnet_compute(self) -> bool:
-        self._graspnet_compute_cancelled = False
-        if not self.graspnet_compute_client.wait_for_service(timeout_sec=0.2):
-            self._graspnet_last_error = "GraspNet compute service is unavailable"
-            self.get_logger().warning(self._graspnet_last_error)
-            return False
-        with self._graspnet_result_lock:
-            self._graspnet_start_seq = self._graspnet_seq
-        future = self.graspnet_compute_client.call_async(Trigger.Request())
-        deadline = time.monotonic() + self.graspnet_compute_timeout_sec
-        while rclpy.ok() and not future.done() and time.monotonic() < deadline:
-            if self.abort.is_set():
-                return False
-            time.sleep(0.02)
-        response = future.result() if future.done() else None
-        self._graspnet_compute_cancelled = bool(
-            response is not None
-            and not response.success
-            and str(response.message).startswith("CANCELED:")
-        )
-        if response is None:
-            self._graspnet_last_error = "GraspNet compute timed out"
-            self.get_logger().error(self._graspnet_last_error)
-            return False
-        if not response.success:
-            self._graspnet_last_error = str(response.message)
-            self.get_logger().error(f"GraspNet compute failed: {self._graspnet_last_error}")
-            return False
-        self._graspnet_last_error = ""
-        self.get_logger().info("GraspNet compute accepted.")
-        return True
-
-    def _graspnet_select(self) -> bool:
-        deadline = time.monotonic() + self.graspnet_result_timeout_sec
-        while rclpy.ok() and time.monotonic() < deadline:
-            with self._graspnet_result_lock:
-                if self._graspnet_poses is not None and self._graspnet_seq > self._graspnet_start_seq:
-                    poses, scores, metadata = self._graspnet_poses, list(self._graspnet_scores), list(self._graspnet_metadata)
-                    break
-            time.sleep(0.02)
-        else:
-            self._graspnet_last_error = "GraspNet produced no result before timeout"
-            return False
-        candidates = build_candidates(
-            poses.poses, scores, metadata, self.graspnet_max_candidates
-        )
-        self._graspnet_candidates = (poses.header, candidates)
-        if not candidates:
-            self._graspnet_last_error = "GraspNet produced no valid candidates"
-            return False
-        self._graspnet_last_error = ""
-        return True
-
-    def _graspnet_plan(self) -> bool:
-        header, candidates = getattr(self, "_graspnet_candidates", (None, ()))
-        if header is None:
-            self._graspnet_last_error = "GraspNet candidate set is unavailable"
-            return False
-        for candidate in candidates:
-            pose = self._graspnet_pose_to_base(header, candidate.camera_pose)
-            if pose is None:
-                continue
-            candidate.base_pose = pose
-            prepare_candidate(
-                candidate,
-                grasp_offset_m=self.graspnet_grasp_offset_m,
-                orientation_rpy_deg=self.graspnet_to_ee_rpy_deg,
-                approach_distance_m=self.graspnet_approach_distance_m,
-                lift_distance_m=self.graspnet_lift_distance,
-            )
-            try:
-                self._check_pose(self._pose_stamped(candidate.approach))
-                self._check_pose(self._pose_stamped(candidate.grasp))
-                self._check_pose(self._pose_stamped(candidate.lift))
-            except ValueError:
-                continue
-            self._graspnet_candidate = candidate
-            return True
-        self._graspnet_last_error = "No executable GraspNet candidate"
-        return False
-
-    def _graspnet_preopen(self) -> bool:
-        candidate = self._graspnet_candidate
-        if candidate is None:
-            return False
-        if self.graspnet_use_width and candidate.preopen_positions is not None:
-            return self.motion.control_gripper(open_gripper=False, positions=candidate.preopen_positions, timeout_sec=90.0)
-        return self._apply_gripper(abs(self.open_finger_position) * 2.0)
-
-    def _graspnet_move(self, name: str, cartesian: bool, velocity: float) -> bool:
-        candidate = self._graspnet_candidate
-        pose = getattr(candidate, name, None) if candidate is not None else None
-        return pose is not None and self._move_pose(self._pose_stamped(pose), f"graspnet_{name}", cartesian, velocity)
-
-    def _graspnet_pose_to_base(self, header, pose: Pose):
-        return pose_to_base(
-            self.tf_buffer,
-            self.base_frame,
-            header,
-            pose,
-            default_frame="camera_color_optical_frame",
-        )
-
-    def _pose_stamped(self, pose: Pose):
-        stamped = PoseStamped()
-        stamped.header.frame_id = self.base_frame
-        stamped.pose = pose
-        return stamped
+        return self._visual_available
 
     def _resting_state_locked(self):
         return "HOLDING" if self._held_source is not None else "IDLE"
@@ -570,30 +268,25 @@ class LlmControlTaskServer(RobotPoseControlServer):
             reasons.append("abort manager is set")
         return "; ".join(reasons)
 
-    def _clear_session(self, msg):
-        session_id = str(msg.data).strip()
-        if not session_id:
-            return
-        with self._lock:
-            clear_session(self._sessions, self._previews, session_id)
-            if self._state == "PREVIEW_READY" and not self._previews:
-                self._state = self._resting_state_locked()
-        self.get_logger().info(f"Cleared language session {session_id!r}.")
-
     def _prune_previews_locked(self, now=None):
-        prune(self._previews, now)
+        for preview_id in [
+            key for key, record in self._previews.items()
+            if preview_status(record.preview, now) != "ready"
+        ]:
+            self._previews.pop(preview_id, None)
         if self._state == "PREVIEW_READY" and not self._previews:
             self._state = self._resting_state_locked()
 
     def _take_preview_locked(self, preview_id):
         self._prune_previews_locked()
-        return take(self._previews, preview_id)
+        return self._previews.pop(preview_id, None)
 
     def _execution_interrupted(self, execution_epoch, goal_handle=None):
         with self._lock:
             valid = safety_execution_valid(self._safety, execution_epoch)
+            shutting_down = self._shutting_down
         cancel_requested = goal_handle is not None and goal_handle.is_cancel_requested
-        return not valid or self.abort.is_set() or cancel_requested
+        return shutting_down or not valid or self.abort.is_set() or cancel_requested
 
     def _mark_stop_state(self):
         with self._lock:
@@ -612,321 +305,6 @@ class LlmControlTaskServer(RobotPoseControlServer):
                 self._held_source = source
                 self._state = "HOLDING"
 
-    def _deepseek(self):
-        key = get_deepseek_api_key()
-        if self._client is None or self._client_key != key:
-            self._client = DeepSeekClient(key, self.deepseek_base_url, self.deepseek_timeout_sec)
-            self._client_key = key
-        return self._client
-
-    def _current_pose(self):
-        transform = self.tf_buffer.lookup_transform(
-            self.base_frame, self.ee_frame, Time(), timeout=Duration(seconds=0.2)
-        )
-        pose = PoseStamped()
-        pose.header = transform.header
-        pose.pose.position.x = transform.transform.translation.x
-        pose.pose.position.y = transform.transform.translation.y
-        pose.pose.position.z = transform.transform.translation.z
-        pose.pose.orientation = transform.transform.rotation
-        return pose
-
-    @staticmethod
-    def _has_disambiguator(instruction: str) -> bool:
-        words = (
-            "左", "右", "前", "后", "上", "下", "最近", "最远", "靠近", "第", "编号", "索引",
-            "left", "right", "front", "back", "nearest", "farthest", "index", "number",
-        )
-        lowered = instruction.lower()
-        return any(word in lowered for word in words)
-
-    def _llm_plan(self, session_id, instruction, metadata):
-        current_pose = self._current_pose()
-        pose = current_pose.pose
-        with self._lock:
-            holding_class = (
-                self._held_source.class_name if self._held_source is not None else None
-            )
-            history = list(self._sessions.get(session_id, ()))
-        context = {
-            "instruction": instruction,
-            "candidates": metadata,
-            "holding_class": holding_class,
-            "current_pose": {
-                "frame_id": self.base_frame,
-                "x": pose.position.x, "y": pose.position.y, "z": pose.position.z,
-                "qx": pose.orientation.x, "qy": pose.orientation.y,
-                "qz": pose.orientation.z, "qw": pose.orientation.w,
-            },
-        }
-        candidates = [
-            DetectionCandidate(item["index"], item["class_name"])
-            for item in metadata
-        ]
-        try:
-            plan = deterministic_visual_plan(
-                instruction,
-                metadata,
-                current_xyz=(pose.position.x, pose.position.y, pose.position.z),
-                pick_classes=self.pick_classes,
-                place_classes=self.place_classes,
-            )
-            if plan is None:
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
-                messages.append({"role": "user", "content": json.dumps(context, ensure_ascii=False)})
-                response_text = self._deepseek().chat(messages, self.deepseek_model)
-                plan = parse_llm_plan(
-                    response_text,
-                    candidates,
-                    pick_classes=self.pick_classes,
-                    place_classes=self.place_classes,
-                    reject_ambiguous=not self._has_disambiguator(instruction),
-                )
-            validate_plan_intent(instruction, plan)
-        except ClarificationRequired:
-            semantic_history = build_semantic_history(instruction)
-            with self._lock:
-                history = self._sessions.setdefault(session_id, [])
-                history.extend(semantic_history)
-                del history[:-20]
-            raise
-        semantic_history = build_semantic_history(instruction, plan, candidates)
-        with self._lock:
-            history = self._sessions.setdefault(session_id, [])
-            history.extend(semantic_history)
-            del history[:-20]
-        return plan
-
-    def _workspace_ok(self, xyz):
-        x, y = (float(value) for value in xyz[:2])
-        return all(lower <= value <= upper for value, lower, upper in zip(
-            (x, y), self.workspace_min_xy, self.workspace_max_xy
-        ))
-
-    def _pose_from_xyz_quat(self, xyz, quat):
-        pose = PoseStamped()
-        pose.header.frame_id = self.base_frame
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = (float(v) for v in xyz)
-        pose.pose.orientation.x, pose.pose.orientation.y = float(quat[0]), float(quat[1])
-        pose.pose.orientation.z, pose.pose.orientation.w = float(quat[2]), float(quat[3])
-        return pose
-
-    def _build_pregrasp_pose(self):
-        cfg = self.pregrasp_pose_cfg
-        quat = Rotation.from_euler(
-            "xyz", [cfg["roll"], cfg["pitch"], cfg["yaw"]], degrees=True
-        ).as_quat()
-        return self._pose_from_xyz_quat((cfg["x"], cfg["y"], cfg["z"]), quat)
-
-    @staticmethod
-    def _pose_public(pose):
-        return {
-            "frame_id": pose.header.frame_id,
-            "position": [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z],
-            "orientation_xyzw": [pose.pose.orientation.x, pose.pose.orientation.y,
-                                 pose.pose.orientation.z, pose.pose.orientation.w],
-        }
-
-    def _check_pose(self, pose):
-        xyz = (pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
-        if not self._workspace_ok(xyz):
-            raise ValueError(f"target outside workspace whitelist: {xyz}")
-        quat = (pose.pose.orientation.x, pose.pose.orientation.y,
-                pose.pose.orientation.z, pose.pose.orientation.w)
-        if self.moveit2_arm.compute_ik(xyz, quat, wait_for_server_timeout_sec=1.0) is None:
-            raise ValueError("target pose has no collision-aware IK solution")
-
-    def _enrich_plan(self, plan: TaskPlan):
-        frame = self.perception.current_frame()
-        current_pose = self._current_pose()
-        relative_base_known = True
-        enriched = []
-        public_steps = []
-        detections = {}
-        for action in plan.actions:
-            action_type = action["type"]
-            if action_type in ("pick", "place", "pick_place"):
-                with self._lock:
-                    held_source = self._held_source
-                validate_visual_state(
-                    action_type,
-                    holding=held_source is not None,
-                    recovery=False,
-                )
-                if action_type in ("pick", "pick_place"):
-                    source = self.perception.resolve_candidate(action["source_index"], frame)
-                    if source is None:
-                        raise ValueError("selected pick target has invalid depth/TF")
-                else:
-                    source = held_source
-                destination = None
-                if action_type in ("place", "pick_place"):
-                    destination = self.perception.resolve_candidate(
-                        action["destination_index"], frame
-                    )
-                    if destination is None:
-                        raise ValueError("selected box has invalid depth/TF")
-                enriched_action = {**action, "source": source}
-                if source is not None:
-                    detections[source.index] = source.public()
-                if destination is not None:
-                    enriched_action["destination"] = destination
-                    detections[destination.index] = destination.public()
-                enriched.append(enriched_action)
-                if action_type == "pick":
-                    poses = self._pick_preview_poses(source)
-                    public_steps.extend(self._pick_public_steps(source))
-                elif action_type == "place":
-                    poses = self._place_preview_poses(source, destination)
-                    public_steps.extend(self._place_public_steps(source, destination))
-                else:
-                    poses = self._pick_place_preview_poses(source, destination)
-                    public_steps.extend(self._pick_place_public_steps(source, destination))
-                for pose in poses.values():
-                    self._check_pose(pose)
-                relative_base_known = False
-            elif action_type in ("move_relative", "move_absolute"):
-                if action_type == "move_relative":
-                    if not relative_base_known:
-                        raise ValueError(
-                            "move_relative after a visual action or Home is unsafe because its "
-                            "execution-time reference pose is not known; use move_absolute instead"
-                        )
-                    q = current_pose.pose.orientation
-                    current_rotation = Rotation.from_quat([q.x, q.y, q.z, q.w])
-                    delta = Rotation.from_euler(
-                        "xyz", [action["droll_deg"], action["dpitch_deg"], action["dyaw_deg"]], degrees=True
-                    )
-                    quat = (delta * current_rotation).as_quat()
-                    xyz = (
-                        current_pose.pose.position.x + action["dx"],
-                        current_pose.pose.position.y + action["dy"],
-                        current_pose.pose.position.z + action["dz"],
-                    )
-                else:
-                    xyz = (action["x"], action["y"], action["z"])
-                    quat = (action["qx"], action["qy"], action["qz"], action["qw"])
-                pose = self._pose_from_xyz_quat(xyz, quat)
-                self._check_pose(pose)
-                enriched.append({**action, "target_pose": pose})
-                public_steps.append({"type": action_type, "target_pose": self._pose_public(pose), "source": "llm_validated"})
-                current_pose = pose
-                relative_base_known = True
-            else:
-                enriched.append(dict(action))
-                if action_type == "set_gripper":
-                    width = abs(self.open_finger_position) * 2.0 if action["state"] == "open" else 0.0
-                    public_steps.append({
-                        "type": "set_gripper", "state": action["state"], "width_m": width,
-                    })
-                else:
-                    public_steps.append({
-                        "type": "pregrasp_pose",
-                        "target_pose": self._pose_public(self.pregrasp_pose),
-                    })
-                    relative_base_known = False
-        return enriched, list(detections.values()), public_steps
-
-    def _grasp_quat(self, source):
-        roll, pitch, yaw_offset = self.grasp_profiles[source.class_name]
-        return Rotation.from_euler(
-            "xyz", [roll, pitch, math.degrees(source.yaw) + yaw_offset], degrees=True
-        ).as_quat()
-
-    def _pick_heights(self, source):
-        return (
-            source.xyz[2] + self.grasp_offset,
-            source.xyz[2] + self.grasp_above,
-            source.xyz[2] + self.place_offset,
-        )
-
-    def _pick_preview_poses(self, source):
-        grasp, approach, carry = self._pick_heights(source)
-        quat = self._grasp_quat(source)
-        return {
-            "approach_pick": self._pose_from_xyz_quat(
-                (source.xyz[0], source.xyz[1], approach), quat
-            ),
-            "grasp": self._pose_from_xyz_quat(
-                (source.xyz[0], source.xyz[1], grasp), quat
-            ),
-            "carry": self._pose_from_xyz_quat(
-                (source.xyz[0], source.xyz[1], carry), quat
-            ),
-        }
-
-    def _place_preview_poses(self, source, destination):
-        if source is None:
-            orientation = self.pregrasp_pose.pose.orientation
-            quat = (orientation.x, orientation.y, orientation.z, orientation.w)
-        else:
-            quat = self._grasp_quat(source)
-        return {
-            "approach_box": self._pose_from_xyz_quat(
-                (destination.xyz[0], destination.xyz[1], destination.xyz[2] + self.place_offset), quat
-            ),
-            "release": self._pose_from_xyz_quat(
-                (destination.xyz[0], destination.xyz[1], destination.xyz[2] + self.descend_to_box), quat
-            ),
-        }
-
-    def _pick_place_preview_poses(self, source, destination):
-        return {
-            **self._pick_preview_poses(source),
-            **self._place_preview_poses(source, destination),
-        }
-
-    def _pick_public_steps(self, source):
-        poses = self._pick_preview_poses(source)
-        open_width = abs(self.open_finger_position) * 2.0
-        return [
-            {"type": "open_gripper", "state": "open", "width_m": open_width},
-            {"type": "approach_pick", "target_pose": self._pose_public(poses["approach_pick"]),
-             "source": "vision"},
-            {"type": "grasp", "target_pose": self._pose_public(poses["grasp"]),
-             "source": "vision"},
-            {"type": "close_gripper", "state": "close", "width_m": 0.0},
-            {"type": "carry", "target_pose": self._pose_public(poses["carry"]),
-             "source": "vision"},
-            {
-                "type": "return_pregrasp_pose",
-                "target_pose": self._pose_public(self.pregrasp_pose),
-            },
-        ]
-
-    def _place_public_steps(self, source, destination):
-        poses = self._place_preview_poses(source, destination)
-        open_width = abs(self.open_finger_position) * 2.0
-        return [
-            {"type": "approach_box", "target_pose": self._pose_public(poses["approach_box"]),
-             "source": "vision_preview"},
-            {"type": "release", "target_pose": self._pose_public(poses["release"]),
-             "source": "vision_preview"},
-            {"type": "release_gripper", "state": "open", "width_m": open_width},
-            {
-                "type": "return_pregrasp_pose",
-                "target_pose": self._pose_public(self.pregrasp_pose),
-            },
-            {"type": "final_gripper_close", "state": "close", "width_m": 0.0},
-        ]
-
-    def _pick_place_public_steps(self, source, destination):
-        return [
-            *self._pick_public_steps(source),
-            *self._place_public_steps(source, destination),
-        ]
-
-    def _handle_control_pose(self, request, response):
-        if bool(request.execute):
-            response.success = False
-            response.message = (
-                "Direct execute=true motion is disabled on the central task server; "
-                "use /llm_control/preview_command then /llm_control/execute_preview."
-            )
-            return response
-        return super()._handle_control_pose(request, response)
-
     def _record_holding_valid_locked(self, record):
         if record is None:
             return False
@@ -944,122 +322,242 @@ class LlmControlTaskServer(RobotPoseControlServer):
             return self._held_source == visual["source"]
         return self._held_source is None
 
-    def _preview_command(self, request, response):
-        response.accepted = False
-        response.status = "rejected"
-        instruction = str(request.instruction).strip()
-        session_id = str(request.session_id).strip() or uuid.uuid4().hex
-        if not instruction:
-            response.message = "Instruction is empty."
-            return response
+    def _clear_task_context_locked(self, session_id):
+        self._task_contexts.pop(str(session_id), None)
+
+    def _clear_session(self, msg):
+        session_id = str(msg.data).strip()
+        if not session_id:
+            return
         with self._lock:
-            self._prune_previews_locked()
-            state = self._state
-            active_mode = getattr(self, "active_mode", "yolo")
-            motion_block_reason = self._motion_block_reason_locked()
-            preview_epoch = self._safety.epoch
-        if active_mode == "graspnet" and self._graspnet_state != LlmGraspnetState.WAIT_G.value:
-            response.message = "LLM GraspNet accepts manual motion only in WAIT_G."
-            return response
-        if motion_block_reason:
-            response.message = (
-                f"Motion is blocked ({motion_block_reason}); press r after the stop "
-                "condition is safe."
-            )
-            return response
-        if state == LlmControlTaskState.PREGRASP_POSE.value:
-            response.message = "Moving to pregrasp pose; wait until /llm_control/status reports IDLE."
-            return response
-        if state in ("STOPPED", "RESETTING", "RESET_FAILED"):
-            response.message = "Motion is stopped or resetting; press r after the stop condition is safe."
-            return response
-        if state == "EXECUTING":
-            response.message = "A task is already executing."
-            return response
-        with self._lock:
-            self._state = LlmControlTaskState.SEARCHING.value
-        visual_intent = instruction_has_visual_intent(instruction)
-        if visual_intent and active_mode != "yolo":
-            response.message = "Visual pick/place requires mode yolo."
-            with self._lock:
+            for preview_id in [
+                key for key, record in self._previews.items()
+                if record.session_id == session_id
+            ]:
+                self._previews.pop(preview_id, None)
+            self._clear_task_context_locked(session_id)
+            for key in [key for key in self._tool_results if key[0] == session_id]:
+                self._tool_results.pop(key, None)
+            if self._state == "PREVIEW_READY" and not self._previews:
                 self._state = self._resting_state_locked()
-            return response
-        if visual_intent and not self._set_llm_yolo_inference(True):
-            response.message = "YOLO inference is unavailable."
-            with self._lock:
-                self._state = self._resting_state_locked()
-            return response
-        try:
-            if visual_intent:
-                self.perception.current_frame()
-                metadata = self.perception.wait_for_planning_metadata()
-            else:
-                metadata = []
-            plan = self._llm_plan(session_id, instruction, metadata)
-            if active_mode == "graspnet" and any(
-                action["type"] not in ("move_relative", "move_absolute", "home")
-                for action in plan.actions
-            ):
-                raise ValueError("GraspNet mode accepts absolute or relative base_link motion only")
-            if any(action["type"] == "place" for action in plan.actions):
-                with self._lock:
-                    self._state = LlmControlTaskState.SEARCHING_BOX.value
-            enriched, detections, steps = self._enrich_plan(plan)
-            preview_id = uuid.uuid4().hex
-            preview = TaskPreview(preview_id, plan, time.monotonic(), self.preview_max_age_sec)
-            public = {
-                "version": 1,
-                "preview_id": preview_id,
-                "frame_id": self.base_frame,
-                "instruction": instruction,
-                "actions": [dict(action) for action in plan.actions],
-                "detections": detections,
-                "steps": steps,
-                "valid_for_sec": self.preview_max_age_sec,
-                "checks": ["fresh_rgbd", "depth", "tf", "workspace", "collision_aware_ik"],
-            }
-            record = PreviewRecord(
-                preview, session_id, instruction, enriched, preview_epoch, public
-            )
-            with self._lock:
-                motion_block_reason = self._motion_block_reason_locked()
-                if (
-                    not safety_execution_valid(self._safety, preview_epoch)
-                    or motion_block_reason
-                    or self._state in ("STOPPED", "RESETTING", "EXECUTING")
-                ):
-                    detail = f": {motion_block_reason}" if motion_block_reason else ""
-                    raise ValueError(
-                        f"motion safety state changed while preview was generated{detail}"
-                    )
-                self._previews[preview_id] = record
-                self._state = LlmControlTaskState.PREVIEW_READY.value
-            response.accepted = True
-            response.status = "ready"
-            response.preview_id = preview_id
-            response.preview_json = json.dumps(public, ensure_ascii=False)
-            response.message = (
-                f"Preview ready. Press y within {self.preview_max_age_sec:g} seconds "
-                "to execute the complete plan."
-            )
-        except (ClarificationRequired, PerceptionUnavailable) as exc:
-            response.status = "clarification_required"
-            response.message = str(exc)
-        except ValueError as exc:
-            response.message = str(exc)
-        except Exception as exc:
-            response.message = f"Preview rejected: {exc}"
-        finally:
-            if visual_intent:
-                self._set_llm_yolo_inference(False)
-        if not response.accepted:
-            with self._lock:
-                if self._state in (
-                    LlmControlTaskState.SEARCHING.value,
-                    LlmControlTaskState.SEARCHING_BOX.value,
-                ):
-                    self._state = self._resting_state_locked()
+
+    @staticmethod
+    def _fill_agent_response(response, value):
+        response.accepted = bool(value.get("accepted", False))
+        response.status = str(value.get("status", "rejected"))
+        response.preview_id = str(value.get("preview_id", ""))
+        response.error_code = str(value.get("error_code", ""))
+        response.result_json = json.dumps(value.get("result", {}), ensure_ascii=False)
         return response
+
+    def _agent_reject(self, response, detail, error_code=None):
+        code = str(error_code or "PLAN_INVALID")
+        self.get_logger().error(f"Agent command rejected [{code}]: {detail}")
+        return self._fill_agent_response(response, {
+            "accepted": False, "status": "rejected", "error_code": code,
+            "result": {
+                "spoken_text": spoken_error_text(code), "detail": str(detail)
+            },
+        })
+
+    def _planning_metadata(self, required):
+        if not required:
+            return []
+        if not self._refresh_yolo_health():
+            raise PreviewFailure("VISION_UNAVAILABLE", self._visual_last_error)
+        try:
+            metadata = self._wait_for_planning_metadata()
+            self._visual_available = True
+            self._visual_last_error = ""
+            return self._exclude_box_contents(metadata)
+        except PerceptionUnavailable as exc:
+            self._visual_available = False
+            self._visual_last_error = exc.error_code
+            raise PreviewFailure(exc.error_code, str(exc)) from exc
+
+    def _store_tool_result(self, key, response):
+        value = {
+            "accepted": bool(response.accepted), "status": response.status,
+            "preview_id": response.preview_id, "error_code": response.error_code,
+            "result": json.loads(response.result_json or "{}"),
+        }
+        with self._lock:
+            self._tool_results[key] = value
+        return response
+
+    def _agent_command(self, request, response):
+        # Serializing this narrow boundary makes call_id idempotency atomic.
+        with self._command_lock:
+            return self._agent_command_locked(request, response)
+
+    def _handle_cancel_tool(self, key, response, session_id, spoken_text):
+        with self._lock:
+            self._clear_task_context_locked(session_id)
+        self._fill_agent_response(response, {
+            "accepted": True,
+            "status": "cancelled",
+            "result": {"spoken_text": spoken_text},
+        })
+        return self._store_tool_result(key, response)
+
+    def _handle_inspect_scene_tool(
+        self, key, response, session_id, *, include_rgb
+    ):
+        frame = self.perception.current_frame()
+        metadata = (
+            [] if frame is None
+            else self.perception.planning_metadata(frame, include_unavailable=True)
+        )
+        scene_id = "scene-" + uuid.uuid4().hex[:12]
+        scene_entities = self._scene_entities(metadata)
+        diagnostics = self.perception.diagnostics(frame)
+        with self._lock:
+            self._task_contexts[session_id] = TaskContext(
+                scene_id=scene_id,
+                scene_created_at=time.monotonic(),
+                entities=scene_entities,
+            )
+        self.get_logger().debug("SCENE_TRACE " + json.dumps({
+            "session_id": session_id,
+            "scene_id": scene_id,
+            "result_seq": max(
+                (item.result_seq for item in scene_entities), default=0
+            ),
+            "entities": [
+                {
+                    "entity_id": item.entity_id,
+                    "class_name": item.class_name,
+                    "role": item.role,
+                    "selectable": item.selectable,
+                    "unavailable_reason": item.unavailable_reason,
+                }
+                for item in scene_entities
+            ],
+        }, ensure_ascii=False, separators=(",", ":")))
+        self._fill_agent_response(response, {
+            "accepted": True,
+            "status": "scene",
+            "result": {
+                "scene_id": scene_id,
+                "entities": [item.public() for item in scene_entities],
+                "diagnostics": diagnostics,
+                "scene_error": "" if frame is not None else "VISION_SYNC_STALE",
+                "include_rgb": include_rgb,
+            },
+        })
+        return self._store_tool_result(key, response)
+
+    def _handle_task_tool(
+        self, key, response, session_id, name, value, preview_epoch
+    ):
+        with self._lock:
+            context = self._task_contexts.get(session_id)
+        if name == "ask_user":
+            self._fill_agent_response(response, {
+                "accepted": True,
+                "status": "clarification_required",
+                "result": {"spoken_text": value["question"]},
+            })
+            return self._store_tool_result(key, response)
+
+        invocation = value
+        if invocation.skill.startswith("yolo."):
+            if context is None or invocation.scene_id != context.scene_id:
+                raise PreviewFailure(
+                    "SCENE_EXPIRED",
+                    "scene_id does not match the current snapshot",
+                )
+            if time.monotonic() - context.scene_created_at > self.preview_max_age_sec:
+                raise PreviewFailure(
+                    "SCENE_EXPIRED", "scene snapshot expired before submission"
+                )
+        metadata = self._planning_metadata(invocation.skill.startswith("yolo."))
+        plan = self._compile_invocation(
+            invocation, context.entities if context else (), metadata
+        )
+        preview_id = self._build_preview(plan, session_id, preview_epoch)
+        self._fill_agent_response(response, {
+            "accepted": True,
+            "status": "ready",
+            "preview_id": preview_id,
+            "result": {
+                "spoken_text": invocation_spoken_text(invocation, len(plan.actions)),
+            },
+        })
+        return self._store_tool_result(key, response)
+
+    def _agent_command_locked(self, request, response):
+        session_id = str(request.session_id).strip()
+        call_id = str(request.call_id).strip()
+        tool_name = str(request.tool_name).strip()
+        if not session_id or not call_id:
+            return self._agent_reject(
+                response,
+                "session_id and call_id are required",
+                "MODEL_RESPONSE_INVALID",
+            )
+        key = (session_id, call_id)
+        with self._lock:
+            cached = self._tool_results.get(key)
+            state = self._state
+            blocked = self._motion_block_reason_locked()
+            preview_epoch = self._safety.epoch
+            shutting_down = self._shutting_down
+        if cached is not None:
+            return self._fill_agent_response(response, cached)
+        if shutting_down:
+            return self._store_tool_result(
+                key, self._agent_reject(response, "server is shutting down", "ROBOT_BUSY")
+            )
+        if tool_name not in ("inspect_scene", "cancel_task") and (
+            blocked
+            or state
+            in ("PREGRASP_POSE", "STOPPED", "RESETTING", "RESET_FAILED", "EXECUTING")
+        ):
+            code = (
+                "ROBOT_BUSY" if state == "EXECUTING" else
+                "ROBOT_INITIALIZING" if state == "PREGRASP_POSE" else
+                "SAFETY_BLOCKED"
+            )
+            return self._store_tool_result(
+                key, self._agent_reject(response, blocked or f"state={state}", code)
+            )
+        try:
+            arguments = json.loads(str(request.arguments_json) or "{}")
+            try:
+                name, value = parse_agent_tool_call(
+                    tool_name, arguments, allowed_tools=AGENT_TOOLS
+                )
+            except PreviewFailure:
+                raise
+            except ValueError as exc:
+                return self._store_tool_result(
+                    key, self._agent_reject(response, exc, "MODEL_RESPONSE_INVALID")
+                )
+            if name == "cancel_task":
+                return self._handle_cancel_tool(key, response, session_id, value)
+            if name == "inspect_scene":
+                return self._handle_inspect_scene_tool(
+                    key,
+                    response,
+                    session_id,
+                    include_rgb=value["include_rgb"],
+                )
+            return self._handle_task_tool(
+                key, response, session_id, name, value, preview_epoch
+            )
+        except PreviewFailure as exc:
+            return self._store_tool_result(key, self._agent_reject(
+                response, exc, exc.error_code
+            ))
+        except ValueError as exc:
+            return self._store_tool_result(
+                key, self._agent_reject(response, exc, "PLAN_INVALID")
+            )
+        except Exception as exc:
+            return self._store_tool_result(
+                key, self._agent_reject(response, exc, "PLAN_INVALID")
+            )
 
     def _goal_callback(self, goal_request):
         rejection_reason = ""
@@ -1067,14 +565,8 @@ class LlmControlTaskServer(RobotPoseControlServer):
             self._prune_previews_locked()
             record = self._previews.get(goal_request.preview_id)
             motion_block_reason = self._motion_block_reason_locked()
-            motion_only = record is not None and all(
-                action.get("type") in ("move_relative", "move_absolute", "home")
-                for action in record.enriched_actions
-            )
-            if getattr(self, "active_mode", "yolo") == "graspnet" and (
-                not motion_only or self._graspnet_state != LlmGraspnetState.WAIT_G.value
-            ):
-                rejection_reason = "GraspNet mode accepts manual base_link motion only in WAIT_G"
+            if self._shutting_down:
+                rejection_reason = "server is shutting down"
             elif motion_block_reason:
                 rejection_reason = motion_block_reason
             elif self._state in (
@@ -1119,17 +611,18 @@ class LlmControlTaskServer(RobotPoseControlServer):
         ]
         if not pick_actions:
             return
-        if not self._set_llm_yolo_inference(True):
+        if not self._refresh_yolo_health():
             raise ValueError("YOLO inference is unavailable for pick revalidation")
-        try:
-            self.perception.wait_for_planning_metadata()
-            for action in pick_actions:
-                source = self.perception.fresh_match(action["source"])
-                if source is None:
-                    raise ValueError("pick target is no longer detectable")
-                action["source"] = source
-        finally:
-            self._set_llm_yolo_inference(False)
+        planned_result_seq = max(
+            int(getattr(action.get("source"), "result_seq", 0))
+            for action in pick_actions
+        )
+        self._wait_for_planning_metadata(after_result_seq=planned_result_seq)
+        for action in pick_actions:
+            source = self.perception.fresh_match(action["source"])
+            if source is None:
+                raise ValueError("pick target is no longer detectable")
+            action["source"] = source
 
     def _feedback(self, goal_handle, index, count, phase, message, pose=None):
         feedback = ExecutePreview.Feedback()
@@ -1181,8 +674,6 @@ class LlmControlTaskServer(RobotPoseControlServer):
             if ok_home:
                 self._reset_failed = False
                 self._safety = complete_safety_reset(self._safety)
-                self._graspnet_reset()
-                self._graspnet_state = LlmGraspnetState.WAIT_G.value
                 self._state = "STOPPED" if self._execution_active else "IDLE"
             elif stopped:
                 self._reset_failed = False
@@ -1191,6 +682,16 @@ class LlmControlTaskServer(RobotPoseControlServer):
                 self._reset_failed = True
                 self._state = "RESET_FAILED"
 
+    @staticmethod
+    def _finish_execution(goal_handle, result, terminal_state, message, *, cancelled=False):
+        if cancelled:
+            goal_handle.canceled()
+        else:
+            goal_handle.abort()
+        result.terminal_state = terminal_state
+        result.message = message
+        return result
+
     def _execute_preview(self, goal_handle):
         request = goal_handle.request
         result = ExecutePreview.Result()
@@ -1198,22 +699,13 @@ class LlmControlTaskServer(RobotPoseControlServer):
             self._prune_previews_locked()
             record = self._previews.get(request.preview_id)
             execution_epoch = self._safety.epoch
-            motion_only = record is not None and all(
-                action.get("type") in ("move_relative", "move_absolute", "home")
-                for action in record.enriched_actions
-            )
-            if getattr(self, "active_mode", "yolo") == "graspnet" and (
-                not motion_only or self._graspnet_state != LlmGraspnetState.WAIT_G.value
-            ):
-                goal_handle.abort()
-                result.terminal_state = "REJECTED"
-                result.message = "GraspNet mode accepts manual base_link motion only in WAIT_G"
-                return result
             if self._execution_active:
-                goal_handle.abort()
-                result.terminal_state = "REJECTED"
-                result.message = "another task began execution before this goal"
-                return result
+                return self._finish_execution(
+                    goal_handle,
+                    result,
+                    "REJECTED",
+                    "another task began execution before this goal",
+                )
             if (
                 record is None
                 or record.safety_epoch != execution_epoch
@@ -1221,53 +713,90 @@ class LlmControlTaskServer(RobotPoseControlServer):
                 or self.abort.is_set()
                 or not self._record_holding_valid_locked(record)
             ):
-                goal_handle.abort()
-                result.terminal_state = "STOPPED"
-                result.message = "motion is stopped or preview is unavailable"
-                return result
+                return self._finish_execution(
+                    goal_handle,
+                    result,
+                    "STOPPED",
+                    "motion is stopped or preview is unavailable",
+                )
             if self._take_preview_locked(request.preview_id) is not record:
-                goal_handle.abort()
-                result.terminal_state = "REJECTED"
-                result.message = "preview expired before execution began"
-                return result
+                return self._finish_execution(
+                    goal_handle,
+                    result,
+                    "REJECTED",
+                    "preview expired before execution began",
+                )
             self._execution_active = True
             self._state = "EXECUTING"
         try:
-            self._revalidate(record)
+            visual_actions = [
+                action for action in record.enriched_actions
+                if action["type"] in ("pick", "place", "pick_place")
+            ]
+            is_batch = len(visual_actions) > 1
+            if not is_batch:
+                self._revalidate(record)
             if self._execution_interrupted(execution_epoch, goal_handle):
                 self._mark_stop_state()
-                goal_handle.abort()
-                result.terminal_state, result.message = "STOPPED", "task invalidated before execution"
-                return result
+                return self._finish_execution(
+                    goal_handle, result, "STOPPED", "task invalidated before execution"
+                )
             step_count = execution_step_count(record.enriched_actions)
             step_index = 0
+            batch_ordinal = 0
             for action in record.enriched_actions:
                 if self._execution_interrupted(execution_epoch, goal_handle):
                     self._mark_stop_state()
-                    if goal_handle.is_cancel_requested:
-                        goal_handle.canceled()
-                    else:
-                        goal_handle.abort()
-                    result.terminal_state, result.message = "STOPPED", "task cancelled"
-                    return result
+                    return self._finish_execution(
+                        goal_handle,
+                        result,
+                        "STOPPED",
+                        "task cancelled",
+                        cancelled=goal_handle.is_cancel_requested,
+                    )
+                if is_batch and action["type"] in ("pick", "place", "pick_place"):
+                    batch_ordinal += 1
+                    action = self._rebind_batch_action(
+                        record,
+                        action,
+                        visual_actions[batch_ordinal - 1:],
+                        batch_ordinal,
+                        len(visual_actions),
+                    )
+                    if self._execution_interrupted(execution_epoch, goal_handle):
+                        self._mark_stop_state()
+                        return self._finish_execution(
+                            goal_handle,
+                            result,
+                            "STOPPED",
+                            "task stopped during batch rebind",
+                        )
                 ok, message, action_steps = self._state_machine.execute_action(
                     action, goal_handle, step_index, step_count, execution_epoch
                 )
                 step_index += action_steps
                 if self._execution_interrupted(execution_epoch, goal_handle):
                     self._mark_stop_state()
-                    if goal_handle.is_cancel_requested:
-                        goal_handle.canceled()
-                    else:
-                        goal_handle.abort()
-                    result.terminal_state, result.message = "STOPPED", "task invalidated by stop/reset"
-                    return result
+                    return self._finish_execution(
+                        goal_handle,
+                        result,
+                        "STOPPED",
+                        "task invalidated by stop/reset",
+                        cancelled=goal_handle.is_cancel_requested,
+                    )
                 if not ok:
                     self._stop_for_motion_failure(message)
-                    goal_handle.abort()
-                    result.terminal_state = "STOPPED"
-                    result.message = message
-                    return result
+                    return self._finish_execution(
+                        goal_handle, result, "STOPPED", message
+                    )
+                if is_batch and action["type"] == "pick_place":
+                    self._batch_trace(
+                        session_id=record.session_id,
+                        preview_id=record.preview.preview_id,
+                        ordinal=int(batch_ordinal),
+                        total=len(visual_actions),
+                        action_result="completed",
+                    )
             goal_handle.succeed()
             result.success = True
             with self._lock:
@@ -1282,7 +811,11 @@ class LlmControlTaskServer(RobotPoseControlServer):
                     else "complete plan executed; still holding object"
                 )
             else:
-                result.message = "complete plan executed"
+                if is_batch:
+                    count = len(visual_actions)
+                    result.message = f"已执行 {count} 次抓放动作"
+                else:
+                    result.message = "complete plan executed"
             return result
         except Exception as exc:
             goal_handle.abort()
@@ -1295,10 +828,16 @@ class LlmControlTaskServer(RobotPoseControlServer):
         finally:
             self._mark_stop_state()
             with self._lock:
+                if not result.success:
+                    self._clear_task_context_locked(record.session_id)
                 self._execution_active = False
                 if self._state == "EXECUTING":
                     self._state = self._resting_state_locked()
-                elif self._state == "STOPPED" and not self._safety.blocked:
+                elif (
+                    self._state == "STOPPED"
+                    and not self._safety.blocked
+                    and not self.abort.is_set()
+                ):
                     self._state = self._resting_state_locked()
 
     def _status(self, _request, response):
@@ -1306,37 +845,43 @@ class LlmControlTaskServer(RobotPoseControlServer):
         with self._lock:
             state = self._state
             holding = self._held_source is not None
-            graspnet_request_pending = self._graspnet_g_requested
         response.success = True
         response.message = json.dumps({
             "state": state,
-            "active_mode": getattr(self, "active_mode", "yolo"),
-            "graspnet_state": self._graspnet_state,
-            "graspnet_request_pending": graspnet_request_pending,
-            "graspnet_last_error": self._graspnet_last_error,
-            "mode_switch_error": self._mode_switch_error,
+            "visual_available": self._visual_available,
+            "visual_last_error": self._visual_last_error,
             **diagnostics,
             "holding": holding,
             "recovery_active": self.abort.recovery_active(),
             "reset_message": self.abort.recovery_message(),
-            "credential_source": "configured" if self._client_key else "not_loaded",
+            "agent_protocol": "qwen_realtime_tools",
         }, ensure_ascii=False)
         return response
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = LlmControlTaskServer()
     executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
     try:
         executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.execute_action.destroy()
-        executor.shutdown()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            with node._lock:
+                node._shutting_down = True
+            if rclpy.ok():
+                node.abort.request_abort("shutdown", command="stop")
+                node.abort.cancel_all_motion_now()
+            executor.shutdown(timeout_sec=2.0)
+            node.execute_action.destroy()
+            node.destroy_node()
+            rclpy.try_shutdown()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

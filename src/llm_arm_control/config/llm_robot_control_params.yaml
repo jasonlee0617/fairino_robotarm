@@ -1,5 +1,8 @@
 common:
-  launch: {}
+  launch:
+    enable_voice: true
+    audio_input_device: auto
+    audio_input_volume_percent: 100
   nodes:
     llm_control_task_server:
       ros__parameters:
@@ -14,7 +17,8 @@ common:
         - box
         preview_max_age_sec: 30.0
         detection_max_age_sec: 1.0
-        vision_wait_timeout_sec: 15.0
+        vision_wait_timeout_sec: 3.5
+        tf_wait_timeout_sec: 0.6
         moveit:
           frames:
             base_frame: base_link
@@ -63,61 +67,43 @@ common:
         arm_max_velocity: 0.2
         arm_max_acceleration: 0.2
         allowed_planning_time: 30.0
-        use_continuous_yolo: true
-        graspnet_poses_topic: /grasp/poses
-        graspnet_scores_topic: /grasp/scores
-        graspnet_metadata_topic: /grasp/metadata
-        graspnet_max_candidates: 50
-        graspnet_approach_distance_m: 0.08
-        graspnet_grasp_offset_m: -0.01
-        graspnet_lift_distance: 0.08
-        graspnet_to_ee_rpy_deg:
-        - 90.0
-        - 0.0
-        - 90.0
-        graspnet_use_width: false
-        graspnet_result_timeout_sec: 8.0
-        graspnet_compute_timeout_sec: 600.0
+        batch_box_zone_radius_m: 0.08
+        batch_rebind_max_distance_m: 0.10
+        batch_rebind_timeout_sec: 5.0
+        batch_rebind_stable_frames: 2
+    voice_wake_node:
+      ros__parameters:
+        sample_rate: 16000
+        num_threads: 2
+        provider: cpu
+        kws_keywords_score: 1.0
+        kws_keywords_threshold: 0.25
+        kws_score_wake_zh: 3.0
+        kws_threshold_wake_zh: 0.05
+        kws_score_wake_en: 1.0
+        kws_threshold_wake_en: 0.15
+        kws_num_trailing_blanks: 1
+        wake_dedup_sec: 2.0
+        voice_diagnostics_enabled: false
+    voice_realtime_node:
+      ros__parameters:
+        realtime_provider: qwen
+        model: qwen3.8-omni-flash-realtime
+        voice: Tina
+        idle_timeout_sec: 30.0
+        vad_silence_ms: 700
+        response_transition_timeout_sec: 5.0
+        audio_chunk_ms: 100
+        temperature: 0.1
+        aec_sink: llm_aec_sink
+        wake_ack_tail_ms: 150
+        color_topic: /camera/camera/color/image_raw
     llm_visual_perception:
       ros__parameters:
-        use_continuous_yolo: true
-    graspnet_inference:
-      ros__parameters:
-        rgb_topic: /camera/camera/color/image_raw
-        depth_topic: /camera/camera/aligned_depth_to_color/image_raw
-        camera_info_topic: /camera/camera/aligned_depth_to_color/camera_info
-        poses_topic: /grasp/poses
-        scores_topic: /grasp/scores
-        metadata_topic: /grasp/metadata
-        preview_best_pose_topic: /graspnet_bringup/preview_best_pose
-        preview_best_score_topic: /graspnet_bringup/preview_best_score
-        base_frame: base_link
-        num_point: 20000
-        min_valid_points: 2000
-        depth_min_m: 0.05
-        depth_max_m: 5.0
-        sync_queue_size: 10
-        sync_slop_s: 0.05
-        random_seed: 0
-        min_grasp_width_m: 0.0
-        max_grasp_width_m: 0.061
-        support_plane_distance_m: 0.005
-        support_plane_min_inlier_ratio: 0.2
-        support_plane_max_tilt_deg: 15.0
-        workspace_x_min_m: -0.3
-        workspace_x_max_m: 0.3
-        workspace_y_min_m: 0.0
-        workspace_y_max_m: 0.6
-        object_min_height_m: 0.0
-        object_max_height_m: 0.15
-        top_k_publish: 5
-        collision_detection_enabled: true
-        collision_voxel_size_m: 0.005
-        collision_approach_distance_m: 0.08
-        collision_threshold: 0.01
-        confirm_before_publish: true
-        confirm_visual_top_k: 50
-        confirm_window_name: 'GraspNet: E=execute, B=preview raw best, ESC/Q=cancel'
+        require_cuda_for_visual_perception: true
+        sync_slop: 0.05
+        sync_watchdog_sec: 3.0
+        expected_camera_rate_hz: 30.0
 environments:
   real:
     launch:
@@ -135,9 +121,7 @@ environments:
       capabilities: ''
       disable_capabilities: ''
       publish_frequency: 100.0
-      graspnet_model_profile: rs
       command_burst_count: 1
-      use_continuous_yolo: true
     nodes:
       llm_control_task_server:
         ros__parameters:
@@ -152,7 +136,6 @@ environments:
       publish_frequency: 100.0
       enable_camera_model: true
       enable_camera_bridge: true
-      enable_servo: true
       camera_profile: d435_color_1280x720x30_depth_848x480x30
       camera_profile_file: ''
       camera_noise_mode: 'off'
@@ -163,5 +146,3 @@ environments:
       spawn_z: 1.02
       controller_spawn_delay: 5.0
       command_burst_count: 1
-      graspnet_model_profile: rs
-      use_continuous_yolo: true

@@ -1,4 +1,6 @@
-# MPC 动态避障依赖生成说明
+# MPC/NMPC 动态避障
+
+[返回技术文档中心](../README.md)
 
 本文说明如何在 ROS 工作区内，从本地 acados/CasADi 工具箱重新生成 MPC/NMPC 求解器、编译 `myrobot_mpc_avoidance`，并验证运行时没有使用桌面工具箱。
 

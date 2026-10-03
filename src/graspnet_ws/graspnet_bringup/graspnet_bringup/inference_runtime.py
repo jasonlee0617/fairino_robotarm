@@ -12,6 +12,7 @@ def graspnet_source_path(*parts: str) -> str:
 
 
 def load_graspnet_modules(baseline_dir: str):
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     for path in (
         baseline_dir,
         os.path.join(baseline_dir, "models"),

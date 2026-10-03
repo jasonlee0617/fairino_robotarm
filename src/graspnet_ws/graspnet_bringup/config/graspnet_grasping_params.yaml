@@ -85,7 +85,7 @@ common:
         min_valid_points: 2000
         depth_min_m: 0.05
         depth_max_m: 5.0
-        sync_queue_size: 10
+        sync_queue_size: 3
         sync_slop_s: 0.05
         random_seed: 0
         support_plane_distance_m: 0.005

@@ -4,29 +4,26 @@ project(llm_arm_control)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(trajectory_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/ControlPose.srv"
-  "srv/PreviewCommand.srv"
+  "srv/AgentCommand.srv"
   "action/ExecutePreview.action"
-  DEPENDENCIES geometry_msgs trajectory_msgs
+  DEPENDENCIES geometry_msgs
 )
 
 ament_python_install_package(llm_arm_control_nodes)
 
-install(PROGRAMS llm_arm_control_nodes/robot_pose_monitor_node.py
-  DESTINATION lib/${PROJECT_NAME} RENAME robot_pose_monitor_node)
-install(PROGRAMS llm_arm_control_nodes/robot_pose_control_server.py
-  DESTINATION lib/${PROJECT_NAME} RENAME robot_pose_control_server)
 install(PROGRAMS llm_arm_control_nodes/llm_control_task_server.py
   DESTINATION lib/${PROJECT_NAME} RENAME llm_control_task_server)
-install(PROGRAMS llm_arm_control_nodes/llm_control_cli.py
-  DESTINATION lib/${PROJECT_NAME} RENAME llm_control_cli)
-
+install(PROGRAMS llm_arm_control_nodes/voice_wake_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME voice_wake_node)
+install(PROGRAMS llm_arm_control_nodes/voice_realtime_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME voice_realtime_node)
+install(PROGRAMS scripts/setup_voice_runtime.sh
+  DESTINATION lib/${PROJECT_NAME})
 install(
-  DIRECTORY config rviz launch
+  DIRECTORY audio config model rviz launch
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -37,13 +34,11 @@ if(BUILD_TESTING)
   set(ENV{PYTEST_DISABLE_PLUGIN_AUTOLOAD} "1")
   set(ENV{PYTHONNOUSERSITE} "1")
   foreach(test_name
-      test_deepseek_client
-      test_deepseek_credentials
-      test_robot_pose_control_server
-      test_llm_control_cli
+      test_voice_control
+      test_agent_command
+      test_realtime_architecture
       test_llm_robot_control_sim_launch
       test_llm_control_state_machine
-      test_llm_control_task_server_robustness
       test_shutdown
       test_task_logic)
     ament_add_pytest_test(

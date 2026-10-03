@@ -1,7 +1,0 @@
-geometry_msgs/PoseStamped target_pose
-float64 gripper_width
-bool execute
----
-bool success
-string message
-trajectory_msgs/JointTrajectory joint_trajectory

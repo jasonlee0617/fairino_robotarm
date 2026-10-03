@@ -3,7 +3,7 @@
 <package format="3">
   <name>llm_arm_control</name>
   <version>0.0.0</version>
-  <description>LLM robot task control and reusable pose adapter nodes.</description>
+  <description>Wake-gated realtime voice and locally validated YOLO robot task control.</description>
   <maintainer email="robot@todo.todo">robot</maintainer>
   <license>MIT</license>
 
@@ -18,17 +18,17 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>audio_common_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
-  <depend>trajectory_msgs</depend>
 
   <exec_depend>myrobot_common</exec_depend>
   <exec_depend>pymoveit2</exec_depend>
   <exec_depend>visual_perception</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>python3-keyring</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>audio_capture</exec_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
@@ -36,8 +36,6 @@
   <exec_depend>fairino_arm_moveit_config</exec_depend>
   <exec_depend>hand_eye_calibration</exec_depend>
   <exec_depend>trajectory_retime_server</exec_depend>
-  <exec_depend>graspnet_bringup</exec_depend>
-  <exec_depend>graspnet_source</exec_depend>
 
   <member_of_group>rosidl_interface_packages</member_of_group>
 

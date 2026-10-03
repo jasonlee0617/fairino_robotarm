@@ -18,9 +18,7 @@ controller_manager:
 
 robot_arm_controller:
   ros__parameters:
-    # MoveIt Servo streams rolling trajectory chunks whose final velocity is
-    # intentionally non-zero. Globally planned trajectories still end at zero.
-    allow_nonzero_velocity_at_trajectory_end: true
+    allow_nonzero_velocity_at_trajectory_end: false
     joints:
       - j1
       - j2

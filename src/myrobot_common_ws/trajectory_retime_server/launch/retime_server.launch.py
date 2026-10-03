@@ -27,6 +27,11 @@ def _build_node(context):
         "config",
         "kinematics.yaml",
     )
+    limits_file = os.path.join(
+        get_package_share_directory("fairino_arm_moveit_config"),
+        "config",
+        "joint_limits.yaml",
+    )
 
     robot_description_xml = LaunchConfiguration("robot_description").perform(context)
     robot_semantic_xml = LaunchConfiguration("robot_description_semantic").perform(context)
@@ -53,6 +58,8 @@ def _build_node(context):
             robot_kinematics = yaml.safe_load(f)
     if not isinstance(robot_kinematics, dict):
         robot_kinematics = {}
+    with open(limits_file, "r", encoding="utf-8") as f:
+        robot_description_planning = yaml.safe_load(f) or {}
 
     retime_server = Node(
         package="trajectory_retime_server",
@@ -64,6 +71,7 @@ def _build_node(context):
             {"robot_description": robot_description_xml},
             {"robot_description_semantic": robot_semantic_xml},
             {"robot_description_kinematics": robot_kinematics},
+            {"robot_description_planning": robot_description_planning},
         ],
     )
     return [retime_server]

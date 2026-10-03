@@ -21,7 +21,7 @@ def robust_obb_depth_samples(
     mask = cv2.erode(mask, np.ones((3, 3), np.uint8), iterations=1)
 
     ys, xs = np.where(mask > 0)
-    if xs.size < 100:
+    if xs.size < int(min_points):
         return None, 0.0, None, None
 
     stride = max(1, int(stride))
@@ -109,3 +109,73 @@ def robust_center3d_from_obb_depth(
         xy_from_obb_center=xy_from_obb_center,
     )
     return center, quality
+
+
+def robust_box_placement_from_depth(
+    poly_2d: np.ndarray,
+    depth: np.ndarray,
+    camera_intrinsics: dict,
+    *,
+    occupied_polys=(),
+    inner_scale: float = 0.65,
+    grid_size: int = 3,
+):
+    """Find a locally consistent free placement point inside an open box."""
+    corners = np.asarray(poly_2d, dtype=np.float32).reshape(4, 2)
+    center_uv = np.mean(corners, axis=0)
+    inner = center_uv + (corners - center_uv) * float(inner_scale)
+    transform = cv2.getPerspectiveTransform(
+        np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32),
+        inner,
+    )
+    candidates = []
+    free_cells = 0
+    grid_size = max(1, int(grid_size))
+    for row in range(grid_size):
+        for column in range(grid_size):
+            x0, x1 = column / grid_size, (column + 1) / grid_size
+            y0, y1 = row / grid_size, (row + 1) / grid_size
+            unit_cell = np.array(
+                [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]],
+                dtype=np.float32,
+            )
+            cell = cv2.perspectiveTransform(unit_cell, transform)[0]
+            cell_uv = np.mean(cell, axis=0)
+            if any(
+                cv2.pointPolygonTest(
+                    np.asarray(occupied, dtype=np.float32),
+                    (float(cell_uv[0]), float(cell_uv[1])),
+                    False,
+                ) >= 0
+                for occupied in occupied_polys
+            ):
+                continue
+            free_cells += 1
+            point, quality = robust_center3d_from_obb_depth(
+                poly_2d=cell,
+                depth=depth,
+                camera_intrinsics=camera_intrinsics,
+                stride=1,
+                min_points=12,
+                max_points=800,
+                depth_max_range=10.0,
+                depth_inlier_m=0.08,
+                depth_mad_scale=3.0,
+                min_depth_inlier_ratio=0.6,
+                xy_from_obb_center=True,
+            )
+            if point is not None:
+                candidates.append((point, float(quality), cell_uv))
+    if not candidates:
+        return None, 0.0, None, free_cells
+
+    farthest_depth = max(float(item[0][2]) for item in candidates)
+    floor_candidates = [
+        item for item in candidates
+        if farthest_depth - float(item[0][2]) <= 0.08
+    ]
+    selected = min(
+        floor_candidates,
+        key=lambda item: float(np.linalg.norm(item[2] - center_uv)),
+    )
+    return selected[0], selected[1], selected[2], free_cells

@@ -243,6 +243,22 @@ def test_d435_rgb_mode_creates_only_the_color_sensor(tmp_path):
     ]
 
 
+def test_llm_profile_can_disable_only_the_unused_native_depth_sensor():
+    mappings = _mappings(PROFILE_1280)
+    mappings["native_depth_enabled"] = "false"
+    root = ET.fromstring(
+        xacro.process_file(
+            str(FAIRINO_XACRO_ROOT / "fairino_arm_inhand_sim.urdf.xacro"),
+            mappings=mappings,
+        ).toxml()
+    )
+    sensors = {sensor.get("name") for sensor in root.findall(".//sensor")}
+
+    assert "camera" in sensors
+    assert "camera_aligned_depth" in sensors
+    assert "camera_native_depth" not in sensors
+
+
 def test_camera_info_bridges_are_isolated_and_sim_to_ros_only(monkeypatch):
     from launch_utils import perception_stack
 
@@ -259,6 +275,7 @@ def test_camera_info_bridges_are_isolated_and_sim_to_ros_only(monkeypatch):
         "/camera/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo",
         "/camera/aligned_depth/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo",
     ]
+
     color_info_node = next(
         node
         for node in nodes
@@ -280,14 +297,59 @@ def test_camera_info_bridges_are_isolated_and_sim_to_ros_only(monkeypatch):
             "/camera/camera/aligned_depth_to_color/camera_info",
         )
     ]
-    image_bridge = nodes[1]
-    assert "/camera/aligned_depth/image@sensor_msgs/msg/Image@ignition.msgs.Image" in image_bridge[
-        "arguments"
+    image_bridges = [
+        node for node in nodes
+        if any("sensor_msgs/msg/Image" in argument for argument in node["arguments"])
     ]
-    assert "/camera/depth_image@sensor_msgs/msg/Image@ignition.msgs.Image" not in image_bridge[
-        "arguments"
+    image_arguments = [
+        argument for node in image_bridges for argument in node["arguments"]
+        if "sensor_msgs/msg/Image" in argument
     ]
+    assert image_arguments == [
+        "/camera/image@sensor_msgs/msg/Image[ignition.msgs.Image",
+        "/camera/aligned_depth/image@sensor_msgs/msg/Image[ignition.msgs.Image",
+        "/camera/native_depth/image@sensor_msgs/msg/Image[ignition.msgs.Image",
+    ]
+    assert len(image_bridges) == 3
+    assert all(len(node["arguments"]) == 1 for node in image_bridges)
+    assert all(argument.count("@") == 1 for argument in image_arguments)
+    assert not any("/image_raw@" in argument for argument in image_arguments)
+    assert not any("/camera/depth_image@" in argument for argument in image_arguments)
 
+    llm_nodes = perception_stack.camera_bridge_nodes(
+        use_sim_time=True, native_depth_enabled=False
+    )
+    llm_arguments = [
+        argument for node in llm_nodes for argument in node["arguments"]
+    ]
+    assert not any("native_depth" in argument for argument in llm_arguments)
+    assert any("aligned_depth/image" in argument for argument in llm_arguments)
+    llm_image_nodes = [
+        node for node in llm_nodes
+        if any("sensor_msgs/msg/Image" in argument for argument in node["arguments"])
+    ]
+    assert len(llm_image_nodes) == 2
+    assert all(len(node["arguments"]) == 1 for node in llm_image_nodes)
+    assert all(
+        argument.count("@") == 1
+        for argument in llm_arguments
+        if "sensor_msgs/msg/Image" in argument
+    )
+
+
+def test_servo_uses_explicit_moveit_parameters_without_sensor_plugin_config():
+    source = (SIM_LAUNCH_ROOT / "launch_utils" / "perception_stack.py").read_text(
+        encoding="utf-8"
+    )
+    servo = source.split("def servo_node", 1)[1]
+    assert "moveit_config.to_dict()" not in servo
+    for name in (
+        "moveit_config.robot_description",
+        "moveit_config.robot_description_semantic",
+        "moveit_config.robot_description_kinematics",
+        "moveit_config.joint_limits",
+    ):
+        assert name in servo
 
 
 def test_eye_on_base_profile_mounts_board_on_wrist_with_base_camera():

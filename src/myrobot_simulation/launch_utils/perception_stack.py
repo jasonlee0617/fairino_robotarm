@@ -3,7 +3,7 @@
 from launch_ros.actions import Node
 
 from .robot_profiles import RobotProfile
-from myrobot_common.launch_utils.yaml_loader import load_yaml, wrap_yaml_as_ros_params_file
+from myrobot_common.launch_utils.yaml_loader import load_yaml
 
 
 def _camera_info_bridge(source: str, target: str, use_sim_time: bool) -> Node:
@@ -17,39 +17,38 @@ def _camera_info_bridge(source: str, target: str, use_sim_time: bool) -> Node:
     )
 
 
-def camera_bridge_nodes(use_sim_time: bool):
+def camera_bridge_nodes(use_sim_time: bool, native_depth_enabled: bool = True):
     color_info_source = "/camera/camera_info"
     color_info_target = "/camera/camera/color/camera_info"
     aligned_depth_info_source = "/camera/aligned_depth/camera_info"
     aligned_depth_info_target = "/camera/camera/aligned_depth_to_color/camera_info"
-    return [
+    image_bridges = [
+        ("/camera/image", "/camera/camera/color/image_raw"),
+        ("/camera/aligned_depth/image", "/camera/camera/aligned_depth_to_color/image_raw"),
+    ]
+    if native_depth_enabled:
+        image_bridges.append(
+            ("/camera/native_depth/image", "/camera/camera/depth/image_rect_raw")
+        )
+    nodes = [
         Node(
             package="ros_gz_bridge",
             executable="parameter_bridge",
-            arguments=["/image_raw@sensor_msgs/msg/Image@gz.msgs.Image"],
-            output="screen",
-        ),
-        Node(
-            package="ros_gz_bridge",
-            executable="parameter_bridge",
-            arguments=[
-                "/camera/image@sensor_msgs/msg/Image@ignition.msgs.Image",
-                "/camera/aligned_depth/image@sensor_msgs/msg/Image@ignition.msgs.Image",
-                "/camera/native_depth/image@sensor_msgs/msg/Image@ignition.msgs.Image",
-                "/camera/native_depth/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo",
-            ],
-            remappings=[
-                ("/camera/image", "/camera/camera/color/image_raw"),
-                (
-                    "/camera/aligned_depth/image",
-                    "/camera/camera/aligned_depth_to_color/image_raw",
-                ),
-                ("/camera/native_depth/image", "/camera/camera/depth/image_rect_raw"),
-                ("/camera/native_depth/camera_info", "/camera/camera/depth/camera_info"),
-            ],
+            arguments=[f"{source}@sensor_msgs/msg/Image[ignition.msgs.Image"],
+            remappings=[(source, target)],
             output="screen",
             parameters=[{"use_sim_time": use_sim_time}],
-        ),
+        )
+        for source, target in image_bridges
+    ]
+    if native_depth_enabled:
+        nodes.append(_camera_info_bridge(
+            "/camera/native_depth/camera_info",
+            "/camera/camera/depth/camera_info",
+            use_sim_time,
+        ))
+    return [
+        *nodes,
         _camera_info_bridge(color_info_source, color_info_target, use_sim_time),
         _camera_info_bridge(aligned_depth_info_source, aligned_depth_info_target, use_sim_time),
     ]
@@ -57,9 +56,6 @@ def camera_bridge_nodes(use_sim_time: bool):
 
 def servo_node(moveit_config, profile: RobotProfile, kinematics_kdl_config, use_sim_time: bool):
     servo_yaml = load_yaml(profile.moveit_config_package, profile.servo_parameters_file)
-    sensors_3d_params = wrap_yaml_as_ros_params_file(
-        profile.moveit_config_package, "config/sensors_3d.yaml"
-    )
     servo_yaml["move_group_name"] = profile.group_name
     servo_yaml["planning_frame"] = profile.planning_frame
     servo_yaml["ee_frame_name"] = profile.ee_frame_name
@@ -78,9 +74,11 @@ def servo_node(moveit_config, profile: RobotProfile, kinematics_kdl_config, use_
         name="servo_node",
         output="screen",
         parameters=[
-            moveit_config.to_dict(),
+            moveit_config.robot_description,
+            moveit_config.robot_description_semantic,
+            moveit_config.robot_description_kinematics,
+            moveit_config.joint_limits,
             kinematics_kdl_config,
-            sensors_3d_params,
             {"moveit_servo": servo_yaml},
             {"use_sim_time": use_sim_time},
         ],

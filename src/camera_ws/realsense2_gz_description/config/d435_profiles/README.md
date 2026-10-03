@@ -1,5 +1,8 @@
 # D435 hardware profiles
 
+These profiles are consumed by the
+[Fairino simulation stack](../../../../docs/simulation-and-planning/仿真环境架构说明.md).
+
 This directory contains canonical, per-resolution D435 `CameraInfo` profiles
 used by the Fairino Gazebo camera model. They are hardware/profile data, not
 hand-eye calibration results or device archives.

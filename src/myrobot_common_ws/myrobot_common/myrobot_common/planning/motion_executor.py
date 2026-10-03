@@ -1,3 +1,4 @@
+import copy
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, Tuple, Any
@@ -300,6 +301,7 @@ class MoveItMotion:
                             target_pose=target_pose,
                             action_name=action_name,
                             fraction_threshold=0.98,
+                            start_joint_state=start_joint_state,
                         )
                     else:
                         plan = arm.plan(
@@ -372,6 +374,69 @@ class MoveItMotion:
             return False
         self.node.get_logger().info(f"✓ {action_name} done.")
         time.sleep(self.action_delay)
+        return True
+
+    @staticmethod
+    def trajectory_end_joint_state(trajectory):
+        """Build a JointState-like object for chained planning from a trajectory endpoint."""
+        from sensor_msgs.msg import JointState
+
+        joint_trajectory = getattr(trajectory, "joint_trajectory", trajectory)
+        if not joint_trajectory.joint_names or not joint_trajectory.points:
+            return None
+        positions = joint_trajectory.points[-1].positions
+        if len(positions) != len(joint_trajectory.joint_names):
+            return None
+        state = JointState()
+        state.name = list(joint_trajectory.joint_names)
+        state.position = list(positions)
+        return state
+
+    @staticmethod
+    def trajectory_start_matches(trajectory, joint_state, tolerance_rad: float) -> bool:
+        joint_trajectory = getattr(trajectory, "joint_trajectory", trajectory)
+        if joint_state is None or not joint_trajectory.points:
+            return False
+        current = {
+            name: float(joint_state.position[index])
+            for index, name in enumerate(joint_state.name)
+            if index < len(joint_state.position)
+        }
+        first = joint_trajectory.points[0].positions
+        return len(first) == len(joint_trajectory.joint_names) and all(
+            name in current
+            and abs(float(first[index]) - current[name]) <= float(tolerance_rad)
+            for index, name in enumerate(joint_trajectory.joint_names)
+        )
+
+    def execute_trajectory(
+        self,
+        trajectory,
+        action_name: str,
+        *,
+        planning_client: Optional[str] = None,
+        timeout_sec: float = 30.0,
+        start_tolerance_rad: Optional[float] = None,
+    ) -> bool:
+        """Execute an already validated trajectory without replanning."""
+        arm = self._select_arm(planning_client)
+        if trajectory is None or self._aborted():
+            return False
+        if start_tolerance_rad is not None and not self.trajectory_start_matches(
+            trajectory, getattr(arm, "joint_state", None), start_tolerance_rad
+        ):
+            self.node.get_logger().error(
+                f"{action_name}: cached trajectory start no longer matches current joints."
+            )
+            return False
+        fresh = copy.deepcopy(trajectory)
+        joint_trajectory = getattr(fresh, "joint_trajectory", fresh)
+        joint_trajectory.header.stamp.sec = 0
+        joint_trajectory.header.stamp.nanosec = 0
+        arm.execute(fresh)
+        if not self._wait(arm, action_name, timeout_sec):
+            self.node.get_logger().error(f"{action_name}: cached trajectory failed.")
+            return False
         return True
 
     def move_to_joints(
@@ -557,25 +622,33 @@ class MoveItMotion:
         moveit_obj.execute(trajectory)
         return self._wait(moveit_obj, action_name, remaining)
 
-    def _plan_fairino_cartesian(self, arm, target_pose, action_name: str, fraction_threshold: float):
+    def _plan_fairino_cartesian(
+        self,
+        arm,
+        target_pose,
+        action_name: str,
+        fraction_threshold: float,
+        start_joint_state=None,
+    ):
         if not self._fairino_cartesian_client.wait_for_service(timeout_sec=0.5):
             self.node.get_logger().error(
                 f"{action_name}: /fairino_cartesian_path service not available."
             )
             return None
-        if arm.joint_state is None:
+        effective_start = start_joint_state if start_joint_state is not None else arm.joint_state
+        if effective_start is None:
             self.node.get_logger().error(f"{action_name}: no joint state for Fairino Cartesian planner.")
             return None
 
         req = GetCartesianPath.Request()
         req.header = target_pose.header
-        req.start_state.joint_state = arm.joint_state
+        req.start_state.joint_state = effective_start
         req.group_name = getattr(arm, "group_name", "robot_arm")
         req.link_name = arm.end_effector_name
         req.waypoints = [target_pose.pose]
         req.max_step = 0.0025
         req.jump_threshold = 0.0
-        req.avoid_collisions = False
+        req.avoid_collisions = True
 
         future = self._fairino_cartesian_client.call_async(req)
         rate = self.node.create_rate(200)
@@ -599,7 +672,9 @@ class MoveItMotion:
                 f"less than threshold {fraction_threshold:.3f}."
             )
             return None
-        if not self._fairino_cartesian_start_is_valid(res.solution.joint_trajectory, arm.joint_state, action_name):
+        if not self._fairino_cartesian_start_is_valid(
+            res.solution.joint_trajectory, effective_start, action_name
+        ):
             return None
         return res.solution.joint_trajectory
 

@@ -6,11 +6,14 @@ import numpy as np
 import pytest
 
 
-pytest.importorskip("cv2")
+cv2 = pytest.importorskip("cv2")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from visual_perception_utils.depth_estimation import robust_center3d_from_obb_depth  # noqa: E402
+from visual_perception_utils.depth_estimation import (  # noqa: E402
+    robust_box_placement_from_depth,
+    robust_center3d_from_obb_depth,
+)
 from visual_perception_utils.obb_geometry import cube_edge_axis, pca_major_axis, yaw_0_to_pi_right0_left180  # noqa: E402
 
 
@@ -137,6 +140,35 @@ def test_center3d_rejects_highly_split_depth_distribution():
     )
 
     assert center is None
+
+
+def test_box_placement_uses_free_floor_cell_when_center_contains_an_object():
+    depth = np.ones((100, 100), dtype=np.float32)
+    depth[40:60, 40:60] = 0.75
+    occupied = np.array([[40, 40], [60, 40], [60, 60], [40, 60]], dtype=np.float32)
+
+    point, quality, uv, free_cells = robust_box_placement_from_depth(
+        _obb(), depth, CAMERA_INTRINSICS, occupied_polys=(occupied,)
+    )
+
+    assert point is not None
+    assert float(point[2]) == pytest.approx(1.0)
+    assert quality >= 0.6
+    assert cv2.pointPolygonTest(occupied, tuple(map(float, uv)), False) < 0
+    assert 0 < free_cells < 9
+
+
+def test_box_placement_rejects_a_fully_occupied_inner_region():
+    occupied = np.array([[20, 20], [80, 20], [80, 80], [20, 80]], dtype=np.float32)
+
+    point, quality, uv, free_cells = robust_box_placement_from_depth(
+        _obb(), np.ones((100, 100), dtype=np.float32), CAMERA_INTRINSICS,
+        occupied_polys=(occupied,),
+    )
+
+    assert point is None and uv is None
+    assert quality == 0.0
+    assert free_cells == 0
 
 
 def test_uniform_sampling_covers_a_large_obb_before_max_points_limit():

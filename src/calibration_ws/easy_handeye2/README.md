@@ -49,9 +49,8 @@ The (arguably) best part is, that you do not have to care about the placement of
 will "erase" that transformation out, and only return the transformation you are interested in.
 
 
-eye-on-base             |  eye-on-hand
-:-------------------------:|:-------------------------:
-![](../../docs/calibration-and-hardware/easy-handeye/img/eye_on_base_aruco_pic.png)  |  ![](../../docs/calibration-and-hardware/easy-handeye/img/eye_on_hand_aruco_pic.png)
+The Fairino workspace keeps its current eye-on-base and eye-in-hand instructions in the
+[hand-eye calibration guide](../../docs/手眼标定/手眼标定文档说明.md).
 
 ## Getting started
 
@@ -200,7 +199,7 @@ nodes (e.g. with `rqt_launch`), if you don't want to shut down the whole system.
 
 ### FAQ
 #### Why is the calibration wrong?
-Please check the [troubleshooting](../../docs/calibration-and-hardware/easy-handeye/troubleshooting.md)
+Please check the Fairino workspace [hand-eye troubleshooting guide](../../docs/手眼标定/标定程序问题排查.md).
 
 #### How can I ...
 ##### Calibrate an RGBD camera (e.g. Kinect, Xtion, ...) with a robot for automatic object collision avoidance with MoveIt! ?
